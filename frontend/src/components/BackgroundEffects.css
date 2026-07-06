@@ -1,0 +1,123 @@
+.bg-glow {
+  position: fixed;
+  border-radius: 50%;
+  filter: blur(150px);
+  z-index: -2;
+}
+
+.glow1 {
+  width: 500px;
+  height: 500px;
+  background: rgba(229, 9, 20, 0.15);
+  top: -100px;
+  left: -150px;
+}
+
+.glow2 {
+  width: 600px;
+  height: 600px;
+  background: rgba(255, 45, 85, 0.1);
+  bottom: -200px;
+  right: -150px;
+}
+
+.beam {
+  position: fixed;
+  width: 800px;
+  height: 2px;
+
+  background:
+    linear-gradient(
+      90deg,
+      transparent,
+      rgba(255,255,255,0.2),
+      #e50914,
+      transparent
+    );
+
+  filter: blur(4px);
+
+  transform: rotate(-25deg);
+
+  z-index: -2;
+}
+
+.beam1 {
+  top: 15%;
+  left: -30%;
+
+  animation:
+    beamMove1
+    20s
+    infinite
+    alternate;
+}
+
+.beam2 {
+  top: 65%;
+  left: -30%;
+
+  animation:
+    beamMove2
+    25s
+    infinite
+    alternate;
+}
+
+@keyframes beamMove1 {
+  to {
+    transform:
+      rotate(-25deg)
+      translateX(300px);
+  }
+}
+
+@keyframes beamMove2 {
+  to {
+    transform:
+      rotate(-25deg)
+      translateX(400px);
+  }
+}
+
+.particles {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  z-index: -2;
+}
+
+.particle {
+  position: absolute;
+  bottom: -20px;
+
+  width: 3px;
+  height: 3px;
+
+  border-radius: 50%;
+
+  background: rgba(255, 80, 80, 0.8);
+
+  box-shadow:
+    0 0 10px #ff2d55,
+    0 0 20px #e50914;
+
+  animation:
+    floatUp
+    linear
+    infinite;
+}
+
+@keyframes floatUp {
+  from {
+    transform:
+      translateY(0)
+      scale(0.5);
+  }
+
+  to {
+    transform:
+      translateY(-120vh)
+      scale(1.2);
+  }
+}

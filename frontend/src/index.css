@@ -1,0 +1,179 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+:root {
+  --bg-main: #050505;
+  --bg-soft: #0b0b0b;
+  --bg-card: rgba(255, 255, 255, 0.05);
+  --bg-card-strong: rgba(255, 255, 255, 0.08);
+
+  --red-main: #e50914;
+  --red-soft: rgba(229, 9, 20, 0.25);
+  --red-glow: rgba(229, 9, 20, 0.55);
+
+  --text-main: #ffffff;
+  --text-muted: #cfcfcf;
+  --text-soft: #9f9f9f;
+
+  --border-soft: rgba(255, 255, 255, 0.08);
+
+  --radius-sm: 12px;
+  --radius-md: 20px;
+  --radius-lg: 28px;
+  --radius-xl: 36px;
+
+  --blur-main: blur(20px);
+
+  --transition-fast: 0.25s ease;
+  --transition-main: 0.35s ease;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  min-height: 100vh;
+  background:
+    radial-gradient(
+      circle at top,
+      rgba(229, 9, 20, 0.13),
+      transparent 32%
+    ),
+    linear-gradient(
+      180deg,
+      #050505,
+      #070707,
+      #050505
+    );
+
+  color: var(--text-main);
+
+  font-family:
+    Inter,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+
+  overflow-x: hidden;
+}
+
+button,
+input,
+textarea {
+  font-family: inherit;
+}
+
+button {
+  border: none;
+  outline: none;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* Premium Scrollbar */
+
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #070707;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(229, 9, 20, 0.45);
+  border-radius: 20px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(229, 9, 20, 0.8);
+}
+
+/* Reusable Glass Effect */
+
+.glass-card {
+  background: var(--bg-card);
+  backdrop-filter: var(--blur-main);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+}
+
+/* Reusable Red Glow */
+
+.red-glow {
+  box-shadow:
+    0 0 20px rgba(229, 9, 20, 0.25),
+    0 0 50px rgba(229, 9, 20, 0.12);
+}
+
+/* Reusable Primary Button */
+
+.primary-btn {
+  background: var(--red-main);
+  color: white;
+
+  padding: 14px 28px;
+
+  border-radius: var(--radius-sm);
+
+  font-weight: 700;
+
+  cursor: pointer;
+
+  transition: var(--transition-main);
+}
+
+.primary-btn:hover {
+  transform: translateY(-3px);
+
+  box-shadow:
+    0 0 18px rgba(229, 9, 20, 0.65),
+    0 0 38px rgba(229, 9, 20, 0.35);
+}
+
+/* Reusable Fade Animation */
+
+.fade-up {
+  animation: fadeUp 0.8s ease both;
+}
+
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Reusable Soft Float */
+
+.soft-float {
+  animation: softFloat 5s ease-in-out infinite;
+}
+
+@keyframes softFloat {
+  0% {
+    transform: translateY(0);
+  }
+
+  50% {
+    transform: translateY(-8px);
+  }
+
+  100% {
+    transform: translateY(0);
+  }
+}

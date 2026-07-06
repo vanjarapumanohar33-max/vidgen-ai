@@ -1,0 +1,13 @@
+.generate-page {
+  min-height: 100vh;
+  background: red;
+
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.generate-page h1 {
+  color: white;
+  font-size: 3rem;
+}
