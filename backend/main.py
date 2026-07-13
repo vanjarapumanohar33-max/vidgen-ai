@@ -175,29 +175,40 @@ def call_gemini_video(youtube_url: str, prompt: str) -> tuple[Optional[str], Opt
     if client is None:
         return None, "Gemini client is not available. Check GEMINI_API_KEY and google-genai installation."
 
-    try:
-        interaction = client.interactions.create(
-            model=GEMINI_MODEL,
-            input=[
-                {
-                    "type": "text",
-                    "text": prompt,
-                },
-                {
-                    "type": "video",
-                    "uri": youtube_url,
-                },
-            ],
-        )
+    video_inputs_to_try = [
+        youtube_url,
+        youtube_url.replace("https://www.youtube.com/watch?v=", "https://youtu.be/"),
+    ]
 
-        output_text = getattr(interaction, "output_text", None)
+    last_error = None
 
-        if output_text and output_text.strip():
-            return output_text.strip(), None
+    for video_input in video_inputs_to_try:
+        try:
+            interaction = client.interactions.create(
+                model=GEMINI_MODEL,
+                input=[
+                    {
+                        "type": "video",
+                        "uri": video_input,
+                    },
+                    {
+                        "type": "text",
+                        "text": prompt,
+                    },
+                ],
+            )
 
-        return None, "Gemini returned an empty video analysis response."
-    except Exception as error:
-        return None, str(error)
+            output_text = getattr(interaction, "output_text", None)
+
+            if output_text and output_text.strip():
+                return output_text.strip(), None
+
+            last_error = "Gemini returned an empty video analysis response."
+
+        except Exception as error:
+            last_error = str(error)
+
+    return None, last_error
 
 
 def call_gemini_text(prompt: str) -> Optional[str]:
@@ -414,13 +425,14 @@ JSON format:
 
     if not ai_text:
         raise HTTPException(
-            status_code=502,
-            detail=(
-                "Video AI could not process this YouTube video. "
-                "Make sure the video is public and try again. "
-                f"Reason: {error_message or 'Unknown error'}"
-            ),
-        )
+    status_code=502,
+    detail=(
+        "Video AI could not process this YouTube video directly. "
+        "This can happen with YouTube Live videos, private/unlisted videos, restricted videos, or videos not supported by Gemini YouTube URL preview. "
+        "Try a normal public YouTube lecture video. "
+        f"Reason: {error_message or 'Unknown error'}"
+    ),
+)
 
     ai_json = extract_json_from_ai_text(ai_text)
 
