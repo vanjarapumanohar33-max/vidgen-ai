@@ -3,7 +3,7 @@ const API_BASE_URL =
 
 function getFriendlyError(error, fallbackMessage) {
   if (error?.name === "AbortError") {
-    return "Backend is taking too long to respond. On free hosting, it may be waking up. Please try again in 30 seconds.";
+    return "Video AI is taking longer than expected. On free hosting, the backend may be waking up. Please try again in 30 seconds.";
   }
 
   if (error?.message) {
@@ -53,7 +53,7 @@ function getTopic(payload) {
   );
 }
 
-async function requestJson(endpoint, options = {}, timeoutMs = 90000) {
+async function requestJson(endpoint, options = {}, timeoutMs = 180000) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -97,31 +97,6 @@ async function requestJson(endpoint, options = {}, timeoutMs = 90000) {
   }
 }
 
-async function checkTranscriptBeforeGenerate(videoUrl) {
-  const encodedUrl = encodeURIComponent(videoUrl);
-
-  const data = await requestJson(
-    `/api/transcript-debug?url=${encodedUrl}`,
-    {
-      method: "GET",
-    },
-    90000
-  );
-
-  if (!data?.valid_url) {
-    throw new Error("Please paste a valid YouTube URL.");
-  }
-
-  if (!data?.transcript_available) {
-    throw new Error(
-      data?.message ||
-        "Transcript is unavailable for this video. Try a YouTube lecture with captions/subtitles enabled."
-    );
-  }
-
-  return data;
-}
-
 export async function generateStudyPack(payload) {
   try {
     const videoUrl = getVideoUrl(payload);
@@ -130,8 +105,6 @@ export async function generateStudyPack(payload) {
     if (!videoUrl) {
       throw new Error("Please paste a valid YouTube URL.");
     }
-
-    await checkTranscriptBeforeGenerate(videoUrl);
 
     const data = await requestJson(
       "/api/generate-study-pack",
@@ -145,20 +118,20 @@ export async function generateStudyPack(payload) {
           plan: payload?.plan || "free",
         }),
       },
-      120000
+      240000
     );
 
     const finalPack = data?.study_pack || data;
 
     if (!data?.success || !finalPack) {
-      throw new Error("Study pack could not be generated. Please try again.");
+      throw new Error("Video AI could not generate the study pack. Please try again.");
     }
 
     return finalPack;
   } catch (error) {
     const friendlyMessage = getFriendlyError(
       error,
-      "Study pack generation failed. Please try another YouTube video."
+      "Video AI generation failed. Try a public YouTube lecture video."
     );
 
     throw new Error(friendlyMessage, { cause: error });
@@ -181,7 +154,7 @@ export async function askTutor(payload) {
           notes: payload.notes || [],
         }),
       },
-      60000
+      90000
     );
 
     if (!data?.success || !data?.answer) {
@@ -209,6 +182,8 @@ export async function exportStudyPackPDF(studyPack) {
       ...(studyPack.two_mark_questions || []),
       ...(studyPack.ten_mark_questions || []),
       ...(studyPack.cram_sheet || []),
+      ...(studyPack.visual_insights || []),
+      ...(studyPack.audio_insights || []),
     ];
 
     const data = await requestJson(
@@ -223,7 +198,7 @@ export async function exportStudyPackPDF(studyPack) {
           questions,
         }),
       },
-      90000
+      120000
     );
 
     if (!data?.success || !data?.download_url) {

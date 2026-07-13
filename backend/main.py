@@ -14,11 +14,6 @@ import json
 load_dotenv()
 
 try:
-    from youtube_transcript_api import YouTubeTranscriptApi
-except Exception:
-    YouTubeTranscriptApi = None
-
-try:
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import inch
     from reportlab.pdfgen import canvas
@@ -34,13 +29,11 @@ except Exception:
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
 
-TRANSCRIPT_LANGUAGES = ["en", "en-US", "en-GB", "te", "hi"]
-
 
 app = FastAPI(
     title="VidGen AI Backend",
-    description="Transcript-first AI backend server for VidGen AI lecture study packs.",
-    version="2.1.0",
+    description="Multimodal AI backend for VidGen AI video study pack generation.",
+    version="3.0.0",
 )
 
 app.add_middleware(
@@ -50,7 +43,7 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "https://vidgen-ai.vercel.app",
     ],
-    allow_origin_regex=r"https://.*\\.vercel\\.app",
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -133,7 +126,7 @@ def extract_youtube_video_id(url: str) -> Optional[str]:
 
     fallback_patterns = [
         r"(?:v=)([a-zA-Z0-9_-]{11})",
-        r"(?:youtu\\.be/)([a-zA-Z0-9_-]{11})",
+        r"(?:youtu\.be/)([a-zA-Z0-9_-]{11})",
         r"(?:shorts/)([a-zA-Z0-9_-]{11})",
         r"(?:embed/)([a-zA-Z0-9_-]{11})",
         r"(?:live/)([a-zA-Z0-9_-]{11})",
@@ -147,115 +140,17 @@ def extract_youtube_video_id(url: str) -> Optional[str]:
     return None
 
 
-def transcript_to_text(fetched_transcript) -> str:
-    if not fetched_transcript:
-        return ""
-
-    try:
-        raw_data = fetched_transcript.to_raw_data()
-        return " ".join(item.get("text", "") for item in raw_data).strip()
-    except Exception:
-        pass
-
-    try:
-        return " ".join(
-            getattr(snippet, "text", "") for snippet in fetched_transcript
-        ).strip()
-    except Exception:
-        pass
-
-    try:
-        return " ".join(
-            item.get("text", "") for item in fetched_transcript
-        ).strip()
-    except Exception:
-        return ""
-
-
-def fetch_youtube_transcript(video_url: str) -> tuple[str, str, bool]:
+def get_canonical_youtube_url(video_url: str) -> tuple[str, str]:
     video_id = extract_youtube_video_id(video_url)
 
     if not video_id:
         raise HTTPException(
             status_code=400,
-            detail="Invalid YouTube URL. Please paste a valid YouTube video, shorts, live, embed, or youtu.be link.",
+            detail="Invalid YouTube URL. Please paste a valid public YouTube video, live, shorts, embed, or youtu.be link.",
         )
 
-    if YouTubeTranscriptApi is None:
-        raise HTTPException(
-            status_code=500,
-            detail="Transcript package is not installed on backend.",
-        )
-
-    ytt_api = YouTubeTranscriptApi()
-
-    try:
-        fetched_transcript = ytt_api.fetch(
-            video_id,
-            languages=TRANSCRIPT_LANGUAGES,
-        )
-
-        transcript_text = transcript_to_text(fetched_transcript)
-
-        if len(transcript_text) > 80:
-            return (
-                transcript_text,
-                "YouTube transcript detected and processed.",
-                True,
-            )
-    except Exception:
-        pass
-
-    try:
-        transcript_list = ytt_api.list(video_id)
-
-        selected_transcript = None
-
-        try:
-            selected_transcript = transcript_list.find_transcript(
-                TRANSCRIPT_LANGUAGES
-            )
-        except Exception:
-            pass
-
-        if selected_transcript is None:
-            for transcript in transcript_list:
-                selected_transcript = transcript
-                break
-
-        if selected_transcript is None:
-            raise Exception("No transcript found.")
-
-        try:
-            if (
-                getattr(selected_transcript, "language_code", "") != "en"
-                and getattr(selected_transcript, "is_translatable", False)
-            ):
-                selected_transcript = selected_transcript.translate("en")
-        except Exception:
-            pass
-
-        fetched_transcript = selected_transcript.fetch()
-        transcript_text = transcript_to_text(fetched_transcript)
-
-        if len(transcript_text) > 80:
-            language_code = getattr(selected_transcript, "language_code", "unknown")
-
-            return (
-                transcript_text,
-                f"YouTube transcript detected and processed. Language: {language_code}.",
-                True,
-            )
-    except Exception:
-        pass
-
-    raise HTTPException(
-        status_code=422,
-        detail=(
-            "Transcript is unavailable for this video, so VidGen AI cannot generate a trusted video-based study pack. "
-            "Try a YouTube lecture with captions/subtitles enabled."
-        ),
-    )
+    canonical_url = f"https://www.youtube.com/watch?v={video_id}"
+    return video_id, canonical_url
 
 
 def get_gemini_client():
@@ -274,7 +169,38 @@ def get_gemini_client():
             return None
 
 
-def call_gemini(prompt: str) -> Optional[str]:
+def call_gemini_video(youtube_url: str, prompt: str) -> tuple[Optional[str], Optional[str]]:
+    client = get_gemini_client()
+
+    if client is None:
+        return None, "Gemini client is not available. Check GEMINI_API_KEY and google-genai installation."
+
+    try:
+        interaction = client.interactions.create(
+            model=GEMINI_MODEL,
+            input=[
+                {
+                    "type": "text",
+                    "text": prompt,
+                },
+                {
+                    "type": "video",
+                    "uri": youtube_url,
+                },
+            ],
+        )
+
+        output_text = getattr(interaction, "output_text", None)
+
+        if output_text and output_text.strip():
+            return output_text.strip(), None
+
+        return None, "Gemini returned an empty video analysis response."
+    except Exception as error:
+        return None, str(error)
+
+
+def call_gemini_text(prompt: str) -> Optional[str]:
     client = get_gemini_client()
 
     if client is None:
@@ -283,7 +209,12 @@ def call_gemini(prompt: str) -> Optional[str]:
     try:
         interaction = client.interactions.create(
             model=GEMINI_MODEL,
-            input=prompt,
+            input=[
+                {
+                    "type": "text",
+                    "text": prompt,
+                }
+            ],
         )
 
         output_text = getattr(interaction, "output_text", None)
@@ -322,7 +253,7 @@ def extract_json_from_ai_text(text: str) -> Optional[dict]:
         pass
 
     try:
-        match = re.search(r"\\{[\\s\\S]*\\}", cleaned)
+        match = re.search(r"\{[\s\S]*\}", cleaned)
         if match:
             return json.loads(match.group(0))
     except Exception:
@@ -331,19 +262,17 @@ def extract_json_from_ai_text(text: str) -> Optional[dict]:
     return None
 
 
-def normalize_list(value, fallback):
-    if isinstance(value, list) and len(value) > 0:
-        clean_items = [str(item).strip() for item in value if str(item).strip()]
-        if clean_items:
-            return clean_items
+def normalize_list(value):
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
 
-    return fallback
+    return []
 
 
-def normalize_mcqs(value, topic):
-    if isinstance(value, list) and len(value) > 0:
-        clean_mcqs = []
+def normalize_mcqs(value):
+    clean_mcqs = []
 
+    if isinstance(value, list):
         for item in value:
             if not isinstance(item, dict):
                 continue
@@ -361,27 +290,13 @@ def normalize_mcqs(value, topic):
                     }
                 )
 
-        if clean_mcqs:
-            return clean_mcqs[:8]
-
-    return [
-        {
-            "question": f"What is the main concept explained in {topic}?",
-            "options": [
-                "Definition and working",
-                "Only unrelated examples",
-                "No explanation",
-                "Random facts",
-            ],
-            "answer": "Definition and working",
-        }
-    ]
+    return clean_mcqs[:10]
 
 
-def normalize_flashcards(value, topic):
-    if isinstance(value, list) and len(value) > 0:
-        clean_cards = []
+def normalize_flashcards(value):
+    clean_cards = []
 
+    if isinstance(value, list):
         for item in value:
             if not isinstance(item, dict):
                 continue
@@ -397,168 +312,189 @@ def normalize_flashcards(value, topic):
                     }
                 )
 
-        if clean_cards:
-            return clean_cards[:8]
-
-    return [
-        {
-            "front": f"What is the key idea of {topic}?",
-            "back": "Read the smart notes and exam focus generated from the transcript.",
-        }
-    ]
+    return clean_cards[:10]
 
 
-def fallback_transcript_pack(topic: str, transcript: str, source_status: str):
+def validate_study_pack_json(ai_json: dict):
+    if not isinstance(ai_json, dict):
+        raise HTTPException(
+            status_code=502,
+            detail="Video AI failed to return a valid study pack. Please try again.",
+        )
+
+    if ai_json.get("error"):
+        raise HTTPException(
+            status_code=422,
+            detail=str(ai_json.get("message") or "This video could not be processed by video AI."),
+        )
+
+    summary = str(ai_json.get("summary") or "").strip()
+    notes = normalize_list(ai_json.get("notes"))
+    exam_focus = normalize_list(ai_json.get("exam_focus"))
+
+    if not summary or len(notes) < 3 or len(exam_focus) < 2:
+        raise HTTPException(
+            status_code=502,
+            detail="Video AI could not extract enough reliable study content from this video. Try another public lecture video.",
+        )
+
+
+def build_multimodal_study_pack(topic: str, video_url: str):
+    video_id, canonical_url = get_canonical_youtube_url(video_url)
     clean_topic = topic.strip() if topic and topic.strip() else "Uploaded Lecture"
-    transcript_preview = transcript[:900].replace("\n", " ").strip()
-
-    return {
-        "id": str(uuid.uuid4()),
-        "title": clean_topic,
-        "source_status": source_status + " AI response failed, transcript fallback used.",
-        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "summary": transcript_preview,
-        "notes": [
-            "Transcript was detected, but AI formatting failed.",
-            "Use the transcript preview to revise the main idea.",
-            "Try generating again after a few seconds.",
-        ],
-        "exam_focus": [
-            "Read the transcript summary carefully.",
-            "Prepare definitions and key terms from the lecture.",
-            "Write answers using headings and step-by-step points.",
-        ],
-        "two_mark_questions": [
-            "What is the main topic discussed in this lecture?",
-            "Write two important points from the lecture.",
-            "Mention one application from the lecture.",
-        ],
-        "ten_mark_questions": [
-            "Explain the main concept discussed in this lecture.",
-            "Write detailed notes from the lecture transcript.",
-        ],
-        "mcqs": normalize_mcqs([], clean_topic),
-        "flashcards": normalize_flashcards([], clean_topic),
-        "cram_sheet": [
-            "Revise transcript summary.",
-            "Mark important definitions.",
-            "Prepare 2-mark and 10-mark answers.",
-        ],
-        "duration": "Transcript-based lecture pack",
-        "accuracy": "Transcript-based fallback",
-    }
-
-
-def build_ai_study_pack(topic: str, transcript: str, source_status: str):
-    clean_topic = topic.strip() if topic and topic.strip() else "Uploaded Lecture"
-    transcript_for_ai = transcript[:18000].replace("\n", " ").strip()
 
     prompt = f"""
-You are VidGen AI, a transcript-first study assistant for Indian engineering students.
+You are VidGen AI, a multimodal lecture analysis engine for Indian students.
 
-You MUST use only the lecture transcript below.
-Do NOT create generic content.
-Do NOT add unrelated concepts.
-If the transcript does not clearly mention something, do not invent it.
+Analyze this YouTube video using BOTH:
+1. Spoken audio / narration
+2. Visual frames / slides / board writing / diagrams / on-screen text
 
-Topic label:
+Video topic label from user:
 {clean_topic}
 
-LECTURE TRANSCRIPT:
-{transcript_for_ai}
+Important rules:
+- Do NOT create generic content.
+- Do NOT guess unrelated topics.
+- Use only what you can understand from the actual video audio and visual content.
+- If you cannot access or analyze the video, return JSON with:
+  {{"error": "VIDEO_NOT_ACCESSIBLE", "message": "This YouTube video could not be processed by video AI."}}
+- If the video is a live stream or long lecture, focus on the clearly understandable educational content.
+- If the video contains board work, slides, diagrams, equations, code, or screen text, include those important visual points.
+- Make the output useful for B.Tech/ECE/engineering-style exam preparation when applicable.
 
-Return ONLY valid JSON. Do not use markdown. Do not add explanation outside JSON.
+Return ONLY valid JSON. No markdown. No extra text outside JSON.
 
 JSON format:
 {{
-  "title": "short clean topic title based on transcript",
-  "summary": "120 to 180 words summary strictly based on transcript",
+  "title": "short title based on actual video content",
+  "detected_topic": "main topic detected from audio and visuals",
+  "summary": "150 to 220 words summary based only on actual video",
+  "visual_insights": [
+    "important things seen in frames/slides/board/screen"
+  ],
+  "audio_insights": [
+    "important things heard in explanation/audio"
+  ],
   "notes": [
-    "8 to 12 smart notes strictly from transcript"
+    "10 to 14 smart study notes based on video"
   ],
   "exam_focus": [
-    "5 to 8 exam focus points strictly from transcript"
+    "6 to 10 exam-focused/high scoring points from video"
   ],
   "two_mark_questions": [
-    "8 two-mark questions answerable from transcript"
+    "8 two-mark questions answerable from video"
   ],
   "ten_mark_questions": [
-    "5 ten-mark questions answerable from transcript"
+    "5 ten-mark questions answerable from video"
   ],
   "mcqs": [
     {{
-      "question": "MCQ question from transcript",
+      "question": "MCQ question from video",
       "options": ["option A", "option B", "option C", "option D"],
       "answer": "correct option text"
     }}
   ],
   "flashcards": [
     {{
-      "front": "question side from transcript",
-      "back": "answer side from transcript"
+      "front": "question side from video",
+      "back": "answer side from video"
     }}
   ],
   "cram_sheet": [
-    "8 last-minute revision points strictly from transcript"
+    "8 to 10 last-minute revision points from video"
+  ],
+  "timestamps": [
+    "important timestamps or approximate moments if available"
   ]
 }}
-
-Rules:
-- Simple Indian student-friendly English.
-- Useful for B.Tech/ECE-style exam preparation when possible.
-- Every point must be traceable to the transcript.
-- MCQs must have exactly 4 options each.
 """
 
-    ai_text = call_gemini(prompt)
+    ai_text, error_message = call_gemini_video(canonical_url, prompt)
+
+    if not ai_text:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Video AI could not process this YouTube video. "
+                "Make sure the video is public and try again. "
+                f"Reason: {error_message or 'Unknown error'}"
+            ),
+        )
+
     ai_json = extract_json_from_ai_text(ai_text)
 
     if not ai_json:
-        return fallback_transcript_pack(clean_topic, transcript, source_status)
+        raise HTTPException(
+            status_code=502,
+            detail="Video AI response was not in a valid format. Please try again.",
+        )
 
-    fallback_pack = fallback_transcript_pack(clean_topic, transcript, source_status)
-    title = str(ai_json.get("title") or clean_topic).strip()
+    validate_study_pack_json(ai_json)
+
+    title = str(ai_json.get("title") or ai_json.get("detected_topic") or clean_topic).strip()
+    summary = str(ai_json.get("summary") or "").strip()
+
+    visual_insights = normalize_list(ai_json.get("visual_insights"))
+    audio_insights = normalize_list(ai_json.get("audio_insights"))
+    notes = normalize_list(ai_json.get("notes"))
+    exam_focus = normalize_list(ai_json.get("exam_focus"))
+    two_mark_questions = normalize_list(ai_json.get("two_mark_questions"))
+    ten_mark_questions = normalize_list(ai_json.get("ten_mark_questions"))
+    cram_sheet = normalize_list(ai_json.get("cram_sheet"))
+    timestamps = normalize_list(ai_json.get("timestamps"))
+
+    combined_notes = []
+
+    if visual_insights:
+      combined_notes.append("Visual insights from video frames/slides:")
+      combined_notes.extend(visual_insights)
+
+    if audio_insights:
+      combined_notes.append("Audio insights from lecture explanation:")
+      combined_notes.extend(audio_insights)
+
+    combined_notes.extend(notes)
 
     return {
         "id": str(uuid.uuid4()),
         "title": title,
-        "source_status": source_status + " AI transcript-based generation completed.",
+        "video_id": video_id,
+        "video_url": canonical_url,
+        "source_status": "Gemini multimodal analysis completed using video audio and visual frames.",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "summary": str(ai_json.get("summary") or fallback_pack["summary"]).strip(),
-        "notes": normalize_list(ai_json.get("notes"), fallback_pack["notes"]),
-        "exam_focus": normalize_list(ai_json.get("exam_focus"), fallback_pack["exam_focus"]),
-        "two_mark_questions": normalize_list(
-            ai_json.get("two_mark_questions"),
-            fallback_pack["two_mark_questions"],
-        ),
-        "ten_mark_questions": normalize_list(
-            ai_json.get("ten_mark_questions"),
-            fallback_pack["ten_mark_questions"],
-        ),
-        "mcqs": normalize_mcqs(ai_json.get("mcqs"), title),
-        "flashcards": normalize_flashcards(ai_json.get("flashcards"), title),
-        "cram_sheet": normalize_list(ai_json.get("cram_sheet"), fallback_pack["cram_sheet"]),
-        "duration": "Transcript-based lecture pack",
-        "accuracy": "AI + transcript verified",
+        "summary": summary,
+        "visual_insights": visual_insights,
+        "audio_insights": audio_insights,
+        "notes": combined_notes,
+        "exam_focus": exam_focus,
+        "two_mark_questions": two_mark_questions,
+        "ten_mark_questions": ten_mark_questions,
+        "mcqs": normalize_mcqs(ai_json.get("mcqs")),
+        "flashcards": normalize_flashcards(ai_json.get("flashcards")),
+        "cram_sheet": cram_sheet,
+        "timestamps": timestamps,
+        "duration": "Multimodal video AI pack",
+        "accuracy": "Audio + visual video analysis",
     }
 
 
 def ask_ai_tutor(question: str, topic: str, notes: List[str]):
     clean_question = question.strip()
     clean_topic = topic.strip() if topic and topic.strip() else "this lecture"
-    notes_context = "\n".join(notes[:10]) if notes else "No generated notes provided."
+    notes_context = "\n".join(notes[:14]) if notes else "No generated notes provided."
 
     prompt = f"""
 You are VidGen AI Tutor.
 
-Answer only using the generated notes below.
-If the answer is not available in the notes, say:
-"This answer is not clearly available from the generated lecture notes."
+Answer only using the generated study pack notes below.
+If the answer is not clearly available from the notes, say:
+"This answer is not clearly available from the generated video study pack."
 
 Topic:
 {clean_topic}
 
-Generated lecture notes:
+Generated video study pack notes:
 {notes_context}
 
 Student question:
@@ -571,14 +507,14 @@ Use:
 3. Exam writing tip
 """
 
-    ai_text = call_gemini(prompt)
+    ai_text = call_gemini_text(prompt)
 
     if ai_text:
         return ai_text.strip()
 
     return (
-        f"For {clean_topic}, I can answer only from the generated lecture notes. "
-        f"Your question was: {clean_question}. Please regenerate the pack or ask from the notes shown."
+        f"This answer is not clearly available from the generated video study pack. "
+        f"Please regenerate the pack or ask a question from the visible notes."
     )
 
 
@@ -587,10 +523,10 @@ def root():
     return {
         "message": "VidGen AI Backend is running successfully.",
         "status": "ok",
-        "version": "2.1.0",
+        "version": "3.0.0",
         "ai_enabled": bool(GEMINI_API_KEY and genai is not None),
         "model": GEMINI_MODEL,
-        "transcript_first": True,
+        "multimodal_video_ai": True,
         "docs": "Open /docs to test APIs.",
     }
 
@@ -600,10 +536,10 @@ def health_check():
     return {
         "status": "healthy",
         "service": "VidGen AI Backend",
-        "version": "2.1.0",
+        "version": "3.0.0",
         "ai_enabled": bool(GEMINI_API_KEY and genai is not None),
         "model": GEMINI_MODEL,
-        "transcript_first": True,
+        "multimodal_video_ai": True,
     }
 
 
@@ -616,45 +552,15 @@ def youtube_url_check(url: str):
             "valid": False,
             "message": "Invalid YouTube URL.",
             "video_id": None,
+            "canonical_url": None,
         }
 
     return {
         "valid": True,
         "message": "Valid YouTube URL.",
         "video_id": video_id,
+        "canonical_url": f"https://www.youtube.com/watch?v={video_id}",
     }
-
-
-@app.get("/api/transcript-debug")
-def transcript_debug(url: str):
-    video_id = extract_youtube_video_id(url)
-
-    if not video_id:
-        return {
-            "valid_url": False,
-            "video_id": None,
-            "transcript_available": False,
-            "message": "Invalid YouTube URL.",
-        }
-
-    try:
-        transcript, source_status, transcript_available = fetch_youtube_transcript(url)
-
-        return {
-            "valid_url": True,
-            "video_id": video_id,
-            "transcript_available": transcript_available,
-            "transcript_length": len(transcript),
-            "source_status": source_status,
-            "preview": transcript[:700],
-        }
-    except HTTPException as error:
-        return {
-            "valid_url": True,
-            "video_id": video_id,
-            "transcript_available": False,
-            "message": error.detail,
-        }
 
 
 @app.post("/api/generate-study-pack")
@@ -662,28 +568,17 @@ def generate_study_pack(request: GenerateStudyPackRequest):
     if not request.video_url or not request.video_url.strip():
         raise HTTPException(
             status_code=400,
-            detail="YouTube lecture URL is required.",
+            detail="YouTube video URL is required.",
         )
 
-    transcript, source_status, transcript_available = fetch_youtube_transcript(
-        request.video_url
-    )
-
-    if not transcript_available:
-        raise HTTPException(
-            status_code=422,
-            detail="Transcript unavailable. Cannot generate trusted video-based content.",
-        )
-
-    study_pack = build_ai_study_pack(
+    study_pack = build_multimodal_study_pack(
         topic=request.topic or "Uploaded Lecture",
-        transcript=transcript,
-        source_status=source_status,
+        video_url=request.video_url,
     )
 
     return {
         "success": True,
-        "message": "Transcript-based AI study pack generated successfully.",
+        "message": "Multimodal video AI study pack generated successfully.",
         "study_pack": study_pack,
     }
 
