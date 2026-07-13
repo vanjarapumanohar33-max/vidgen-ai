@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -10,6 +10,10 @@ import os
 import re
 import uuid
 import json
+import tempfile
+import shutil
+import time
+import mimetypes
 
 load_dotenv()
 
@@ -528,7 +532,275 @@ Use:
         f"This answer is not clearly available from the generated video study pack. "
         f"Please regenerate the pack or ask a question from the visible notes."
     )
+SUPPORTED_VIDEO_MIME_TYPES = {
+    "video/mp4",
+    "video/mpeg",
+    "video/quicktime",
+    "video/mov",
+    "video/avi",
+    "video/x-msvideo",
+    "video/x-flv",
+    "video/mpg",
+    "video/webm",
+    "video/x-ms-wmv",
+    "video/3gpp",
+}
 
+MAX_UPLOAD_BYTES = 200 * 1024 * 1024
+
+
+def get_file_state_name(file_obj):
+    state = getattr(file_obj, "state", None)
+
+    if state is None:
+        return ""
+
+    return getattr(state, "name", str(state))
+
+
+def get_file_mime_type(file_path: str, upload_mime_type: str = "") -> str:
+    if upload_mime_type and upload_mime_type != "application/octet-stream":
+        return upload_mime_type
+
+    guessed_mime, _ = mimetypes.guess_type(file_path)
+
+    return guessed_mime or "video/mp4"
+
+
+async def save_uploaded_video(upload_file: UploadFile) -> tuple[str, str]:
+    original_name = upload_file.filename or "uploaded_video.mp4"
+    file_extension = os.path.splitext(original_name)[1] or ".mp4"
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as temp_file:
+        temp_path = temp_file.name
+        total_size = 0
+
+        while True:
+            chunk = await upload_file.read(1024 * 1024)
+
+            if not chunk:
+                break
+
+            total_size += len(chunk)
+
+            if total_size > MAX_UPLOAD_BYTES:
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+
+                raise HTTPException(
+                    status_code=413,
+                    detail="Video is too large for this demo server. Upload a short lecture video under 200MB.",
+                )
+
+            temp_file.write(chunk)
+
+    mime_type = get_file_mime_type(temp_path, upload_file.content_type or "")
+
+    if mime_type not in SUPPORTED_VIDEO_MIME_TYPES:
+        try:
+            os.remove(temp_path)
+        except Exception:
+            pass
+
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported video format. Upload MP4, MOV, AVI, WebM, MPEG, WMV, FLV, MPG, or 3GPP.",
+        )
+
+    return temp_path, mime_type
+
+
+def build_video_analysis_prompt(clean_topic: str):
+    return f"""
+You are VidGen AI, a multimodal lecture analysis engine for Indian students.
+
+Analyze the uploaded video using BOTH:
+1. Spoken audio / narration
+2. Visual frames / slides / board writing / diagrams / on-screen text
+
+Topic label from user:
+{clean_topic}
+
+Important rules:
+- Do NOT create generic content.
+- Do NOT guess unrelated topics.
+- Use only what you can understand from the actual uploaded video audio and visual content.
+- If the video is unclear, mention only what is clearly understandable.
+- If the video contains board work, slides, diagrams, equations, code, or screen text, include those visual points.
+- Make the output useful for B.Tech/ECE/engineering-style exam preparation when applicable.
+
+Return ONLY valid JSON. No markdown. No extra text outside JSON.
+
+JSON format:
+{{
+  "title": "short title based on actual video content",
+  "detected_topic": "main topic detected from audio and visuals",
+  "summary": "150 to 220 words summary based only on actual video",
+  "visual_insights": [
+    "important things seen in frames/slides/board/screen"
+  ],
+  "audio_insights": [
+    "important things heard in explanation/audio"
+  ],
+  "notes": [
+    "10 to 14 smart study notes based on video"
+  ],
+  "exam_focus": [
+    "6 to 10 exam-focused/high scoring points from video"
+  ],
+  "two_mark_questions": [
+    "8 two-mark questions answerable from video"
+  ],
+  "ten_mark_questions": [
+    "5 ten-mark questions answerable from video"
+  ],
+  "mcqs": [
+    {{
+      "question": "MCQ question from video",
+      "options": ["option A", "option B", "option C", "option D"],
+      "answer": "correct option text"
+    }}
+  ],
+  "flashcards": [
+    {{
+      "front": "question side from video",
+      "back": "answer side from video"
+    }}
+  ],
+  "cram_sheet": [
+    "8 to 10 last-minute revision points from video"
+  ],
+  "timestamps": [
+    "important timestamps or approximate moments if available"
+  ]
+}}
+"""
+
+
+def call_gemini_uploaded_video(file_path: str, mime_type: str, prompt: str) -> tuple[Optional[str], Optional[str]]:
+    client = get_gemini_client()
+
+    if client is None:
+        return None, "Gemini client is not available. Check GEMINI_API_KEY and google-genai installation."
+
+    uploaded_file = None
+
+    try:
+        uploaded_file = client.files.upload(file=file_path)
+
+        while get_file_state_name(uploaded_file) not in ["ACTIVE", "FAILED"]:
+            time.sleep(5)
+            uploaded_file = client.files.get(name=uploaded_file.name)
+
+        if get_file_state_name(uploaded_file) == "FAILED":
+            return None, "Gemini file processing failed."
+
+        file_uri = getattr(uploaded_file, "uri", None)
+        file_mime_type = getattr(uploaded_file, "mime_type", None) or mime_type
+
+        if not file_uri:
+            return None, "Gemini uploaded file URI was not available."
+
+        interaction = client.interactions.create(
+            model=GEMINI_MODEL,
+            input=[
+                {
+                    "type": "video",
+                    "uri": file_uri,
+                    "mime_type": file_mime_type,
+                },
+                {
+                    "type": "text",
+                    "text": prompt,
+                },
+            ],
+        )
+
+        output_text = getattr(interaction, "output_text", None)
+
+        if output_text and output_text.strip():
+            return output_text.strip(), None
+
+        return None, "Gemini returned an empty uploaded-video response."
+
+    except Exception as error:
+        return None, str(error)
+
+
+def build_uploaded_video_study_pack(topic: str, file_path: str, mime_type: str):
+    clean_topic = topic.strip() if topic and topic.strip() else "Uploaded Lecture"
+    prompt = build_video_analysis_prompt(clean_topic)
+
+    ai_text, error_message = call_gemini_uploaded_video(
+        file_path=file_path,
+        mime_type=mime_type,
+        prompt=prompt,
+    )
+
+    if not ai_text:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Uploaded video AI analysis failed. Try a shorter MP4 lecture video. "
+                f"Reason: {error_message or 'Unknown error'}"
+            ),
+        )
+
+    ai_json = extract_json_from_ai_text(ai_text)
+
+    if not ai_json:
+        raise HTTPException(
+            status_code=502,
+            detail="Video AI response was not in valid JSON format. Please try again.",
+        )
+
+    validate_study_pack_json(ai_json)
+
+    title = str(ai_json.get("title") or ai_json.get("detected_topic") or clean_topic).strip()
+    summary = str(ai_json.get("summary") or "").strip()
+
+    visual_insights = normalize_list(ai_json.get("visual_insights"))
+    audio_insights = normalize_list(ai_json.get("audio_insights"))
+    notes = normalize_list(ai_json.get("notes"))
+    exam_focus = normalize_list(ai_json.get("exam_focus"))
+    two_mark_questions = normalize_list(ai_json.get("two_mark_questions"))
+    ten_mark_questions = normalize_list(ai_json.get("ten_mark_questions"))
+    cram_sheet = normalize_list(ai_json.get("cram_sheet"))
+    timestamps = normalize_list(ai_json.get("timestamps"))
+
+    combined_notes = []
+
+    if visual_insights:
+        combined_notes.append("Visual insights from uploaded video frames/slides:")
+        combined_notes.extend(visual_insights)
+
+    if audio_insights:
+        combined_notes.append("Audio insights from uploaded video explanation:")
+        combined_notes.extend(audio_insights)
+
+    combined_notes.extend(notes)
+
+    return {
+        "id": str(uuid.uuid4()),
+        "title": title,
+        "source_status": "Gemini multimodal analysis completed using uploaded video audio and visual frames.",
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "summary": summary,
+        "visual_insights": visual_insights,
+        "audio_insights": audio_insights,
+        "notes": combined_notes,
+        "exam_focus": exam_focus,
+        "two_mark_questions": two_mark_questions,
+        "ten_mark_questions": ten_mark_questions,
+        "mcqs": normalize_mcqs(ai_json.get("mcqs")),
+        "flashcards": normalize_flashcards(ai_json.get("flashcards")),
+        "cram_sheet": cram_sheet,
+        "timestamps": timestamps,
+        "duration": "Uploaded multimodal video AI pack",
+        "accuracy": "Uploaded video audio + visual analysis",
+    }
 
 @app.get("/")
 def root():
@@ -593,6 +865,37 @@ def generate_study_pack(request: GenerateStudyPackRequest):
         "message": "Multimodal video AI study pack generated successfully.",
         "study_pack": study_pack,
     }
+
+@app.post("/api/generate-study-pack-upload")
+async def generate_study_pack_upload(
+    video_file: UploadFile = File(...),
+    topic: str = Form("Uploaded Lecture"),
+    account_type: str = Form("student"),
+    plan: str = Form("free"),
+):
+    temp_path = None
+
+    try:
+        temp_path, mime_type = await save_uploaded_video(video_file)
+
+        study_pack = build_uploaded_video_study_pack(
+            topic=topic,
+            file_path=temp_path,
+            mime_type=mime_type,
+        )
+
+        return {
+            "success": True,
+            "message": "Uploaded video AI study pack generated successfully.",
+            "study_pack": study_pack,
+        }
+
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 
 
 @app.post("/api/ask-tutor")
