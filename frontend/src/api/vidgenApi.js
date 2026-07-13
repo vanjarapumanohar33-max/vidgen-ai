@@ -21,8 +21,19 @@ function getVideoUrl(payload) {
   return (
     payload?.video_url ||
     payload?.videoUrl ||
+    payload?.videoURL ||
     payload?.youtubeUrl ||
+    payload?.youtubeURL ||
     payload?.youtube_url ||
+    payload?.youtubeLink ||
+    payload?.videoLink ||
+    payload?.inputUrl ||
+    payload?.lectureUrl ||
+    payload?.lecture_url ||
+    payload?.youtubeInput ||
+    payload?.videoInput ||
+    payload?.youtube ||
+    payload?.video ||
     payload?.url ||
     payload?.link ||
     ""
@@ -31,14 +42,14 @@ function getVideoUrl(payload) {
 
 function getTopic(payload) {
   if (typeof payload === "string") {
-    return "Lecture Topic";
+    return "Uploaded Lecture";
   }
 
   return (
     payload?.topic ||
     payload?.title ||
     payload?.lectureTitle ||
-    "Lecture Topic"
+    "Uploaded Lecture"
   );
 }
 
@@ -86,6 +97,31 @@ async function requestJson(endpoint, options = {}, timeoutMs = 90000) {
   }
 }
 
+async function checkTranscriptBeforeGenerate(videoUrl) {
+  const encodedUrl = encodeURIComponent(videoUrl);
+
+  const data = await requestJson(
+    `/api/transcript-debug?url=${encodedUrl}`,
+    {
+      method: "GET",
+    },
+    90000
+  );
+
+  if (!data?.valid_url) {
+    throw new Error("Please paste a valid YouTube URL.");
+  }
+
+  if (!data?.transcript_available) {
+    throw new Error(
+      data?.message ||
+        "Transcript is unavailable for this video. Try a YouTube lecture with captions/subtitles enabled."
+    );
+  }
+
+  return data;
+}
+
 export async function generateStudyPack(payload) {
   try {
     const videoUrl = getVideoUrl(payload);
@@ -95,6 +131,8 @@ export async function generateStudyPack(payload) {
       throw new Error("Please paste a valid YouTube URL.");
     }
 
+    await checkTranscriptBeforeGenerate(videoUrl);
+
     const data = await requestJson(
       "/api/generate-study-pack",
       {
@@ -102,18 +140,21 @@ export async function generateStudyPack(payload) {
         body: JSON.stringify({
           video_url: videoUrl,
           topic,
-          account_type: payload?.account_type || "student",
+          account_type:
+            payload?.account_type || payload?.accountType || "student",
           plan: payload?.plan || "free",
         }),
       },
       120000
     );
 
-    if (!data?.success || !data?.study_pack) {
+    const finalPack = data?.study_pack || data;
+
+    if (!data?.success || !finalPack) {
       throw new Error("Study pack could not be generated. Please try again.");
     }
 
-    return data.study_pack;
+    return finalPack;
   } catch (error) {
     const friendlyMessage = getFriendlyError(
       error,
