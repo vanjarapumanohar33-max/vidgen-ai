@@ -5,9 +5,13 @@ from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
+from dotenv import load_dotenv
 import os
 import re
 import uuid
+import json
+
+load_dotenv()
 
 try:
     from youtube_transcript_api import YouTubeTranscriptApi
@@ -21,11 +25,20 @@ try:
 except Exception:
     canvas = None
 
+try:
+    from google import genai
+except Exception:
+    genai = None
+
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+
 
 app = FastAPI(
     title="VidGen AI Backend",
-    description="Production-ready backend server for VidGen AI lecture-to-study-pack generation.",
-    version="1.1.0",
+    description="AI-powered backend server for VidGen AI lecture-to-study-pack generation.",
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -68,7 +81,6 @@ def clean_video_id(video_id: str) -> Optional[str]:
         return None
 
     video_id = video_id.strip()
-
     video_id = video_id.split("?")[0]
     video_id = video_id.split("&")[0]
     video_id = video_id.split("/")[0]
@@ -143,7 +155,7 @@ def fetch_youtube_transcript(video_url: str) -> tuple[str, str]:
         )
 
     if YouTubeTranscriptApi is None:
-        return "", "Transcript package is unavailable. Demo study pack generated from topic."
+        return "", "Transcript package unavailable. AI generated content from topic only."
 
     try:
         transcript_items = YouTubeTranscriptApi.get_transcript(
@@ -160,13 +172,188 @@ def fetch_youtube_transcript(video_url: str) -> tuple[str, str]:
         if transcript_text:
             return transcript_text, "YouTube transcript detected and processed."
 
-        return "", "Transcript was empty. Demo study pack generated from topic."
+        return "", "Transcript was empty. AI generated content from topic only."
 
     except Exception:
-        return "", "Transcript unavailable for this video. Demo study pack generated from topic."
+        return "", "Transcript unavailable for this video. AI generated content from topic only."
 
 
-def build_study_pack(topic: str, transcript: str, source_status: str):
+def get_gemini_client():
+    if genai is None:
+        return None
+
+    if not GEMINI_API_KEY:
+        return None
+
+    try:
+        return genai.Client(api_key=GEMINI_API_KEY)
+    except Exception:
+        try:
+            return genai.Client()
+        except Exception:
+            return None
+
+
+def call_gemini(prompt: str) -> Optional[str]:
+    client = get_gemini_client()
+
+    if client is None:
+        return None
+
+    try:
+        interaction = client.interactions.create(
+            model=GEMINI_MODEL,
+            input=prompt,
+        )
+
+        output_text = getattr(interaction, "output_text", None)
+
+        if output_text:
+            return output_text.strip()
+
+    except Exception:
+        pass
+
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+        )
+
+        output_text = getattr(response, "text", None)
+
+        if output_text:
+            return output_text.strip()
+
+    except Exception:
+        pass
+
+    return None
+
+
+def extract_json_from_ai_text(text: str) -> Optional[dict]:
+    if not text:
+        return None
+
+    cleaned = text.strip()
+
+    cleaned = cleaned.replace("```json", "").replace("```", "").strip()
+
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        pass
+
+    try:
+        match = re.search(r"\{[\s\S]*\}", cleaned)
+        if match:
+            return json.loads(match.group(0))
+    except Exception:
+        pass
+
+    return None
+
+
+def normalize_list(value, fallback):
+    if isinstance(value, list) and len(value) > 0:
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    return fallback
+
+
+def normalize_mcqs(value, topic):
+    if isinstance(value, list) and len(value) > 0:
+        clean_mcqs = []
+
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+
+            question = str(item.get("question", "")).strip()
+            options = item.get("options", [])
+            answer = str(item.get("answer", "")).strip()
+
+            if question and isinstance(options, list) and len(options) >= 4 and answer:
+                clean_mcqs.append(
+                    {
+                        "question": question,
+                        "options": [str(option).strip() for option in options[:4]],
+                        "answer": answer,
+                    }
+                )
+
+        if clean_mcqs:
+            return clean_mcqs[:8]
+
+    return [
+        {
+            "question": f"What is the first step to understand {topic}?",
+            "options": [
+                "Learn the definition",
+                "Skip the basics",
+                "Only memorize formulas",
+                "Ignore examples",
+            ],
+            "answer": "Learn the definition",
+        },
+        {
+            "question": "Which format is best for exam answers?",
+            "options": [
+                "Step-by-step points",
+                "One long paragraph",
+                "Only keywords",
+                "No headings",
+            ],
+            "answer": "Step-by-step points",
+        },
+        {
+            "question": "Which section helps in last-minute revision?",
+            "options": [
+                "Cram sheet",
+                "Random notes",
+                "Unverified content",
+                "Only long answers",
+            ],
+            "answer": "Cram sheet",
+        },
+    ]
+
+
+def normalize_flashcards(value, topic):
+    if isinstance(value, list) and len(value) > 0:
+        clean_cards = []
+
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+
+            front = str(item.get("front", "")).strip()
+            back = str(item.get("back", "")).strip()
+
+            if front and back:
+                clean_cards.append(
+                    {
+                        "front": front,
+                        "back": back,
+                    }
+                )
+
+        if clean_cards:
+            return clean_cards[:8]
+
+    return [
+        {
+            "front": f"What is {topic}?",
+            "back": f"{topic} should be explained with definition, working principle, important points, and applications.",
+        },
+        {
+            "front": "How to write a 10-mark answer?",
+            "back": "Use heading, definition, diagram or flow, explanation, advantages, applications, and conclusion.",
+        },
+    ]
+
+
+def build_demo_study_pack(topic: str, transcript: str, source_status: str):
     clean_topic = topic.strip() if topic and topic.strip() else "Lecture Topic"
     has_transcript = len(transcript.strip()) > 80
 
@@ -199,82 +386,6 @@ def build_study_pack(topic: str, transcript: str, source_status: str):
             f"Lecture context detected: {transcript_preview}...",
         )
 
-    exam_focus = [
-        f"Prepare a perfect 2-mark definition of {clean_topic}.",
-        "Prepare one 10-mark answer with heading, diagram or flow, explanation, applications, and conclusion.",
-        "Revise advantages, disadvantages, applications, key terms, and repeated question patterns.",
-        "Practice writing the answer in 5 to 6 clear points.",
-    ]
-
-    two_mark_questions = [
-        f"Define {clean_topic}.",
-        f"Write two applications of {clean_topic}.",
-        f"Mention two advantages of {clean_topic}.",
-        f"Write any two important terms related to {clean_topic}.",
-    ]
-
-    ten_mark_questions = [
-        f"Explain {clean_topic} with a neat diagram or flow.",
-        f"Describe the working principle of {clean_topic} in detail.",
-        f"Write the advantages, disadvantages, and applications of {clean_topic}.",
-    ]
-
-    mcqs = [
-        {
-            "question": f"What is the best first step to understand {clean_topic}?",
-            "options": [
-                "Learn the definition",
-                "Skip the basics",
-                "Read random examples",
-                "Memorize only formulas",
-            ],
-            "answer": "Learn the definition",
-        },
-        {
-            "question": "Which format is best for exam answers?",
-            "options": [
-                "Step-by-step points",
-                "One long paragraph",
-                "Only keywords",
-                "No headings",
-            ],
-            "answer": "Step-by-step points",
-        },
-        {
-            "question": "Which section helps in last-minute revision?",
-            "options": [
-                "Cram sheet",
-                "Random notes",
-                "Unverified content",
-                "Only long answers",
-            ],
-            "answer": "Cram sheet",
-        },
-    ]
-
-    flashcards = [
-        {
-            "front": f"What is {clean_topic}?",
-            "back": f"{clean_topic} should be explained with definition, working principle, important points, and applications.",
-        },
-        {
-            "front": "How to write a 10-mark answer?",
-            "back": "Use heading, definition, diagram or flow, explanation, advantages, applications, and conclusion.",
-        },
-        {
-            "front": "What is exam focus?",
-            "back": "Exam focus means preparing high-scoring and repeated exam parts first.",
-        },
-    ]
-
-    cram_sheet = [
-        f"Revise the definition of {clean_topic}.",
-        "Remember key points in correct order.",
-        "Practice 2-mark and 10-mark questions.",
-        "Use diagrams or flow wherever possible.",
-        "Write final answers neatly with headings.",
-    ]
-
     return {
         "id": str(uuid.uuid4()),
         "title": clean_topic,
@@ -282,15 +393,181 @@ def build_study_pack(topic: str, transcript: str, source_status: str):
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "summary": summary,
         "notes": notes,
-        "exam_focus": exam_focus,
-        "two_mark_questions": two_mark_questions,
-        "ten_mark_questions": ten_mark_questions,
-        "mcqs": mcqs,
-        "flashcards": flashcards,
-        "cram_sheet": cram_sheet,
-        "duration": "Demo lecture",
-        "accuracy": "Lecture-based" if has_transcript else "Topic-based demo",
+        "exam_focus": [
+            f"Prepare a perfect 2-mark definition of {clean_topic}.",
+            "Prepare one 10-mark answer with heading, diagram or flow, explanation, applications, and conclusion.",
+            "Revise advantages, disadvantages, applications, key terms, and repeated question patterns.",
+            "Practice writing the answer in 5 to 6 clear points.",
+        ],
+        "two_mark_questions": [
+            f"Define {clean_topic}.",
+            f"Write two applications of {clean_topic}.",
+            f"Mention two advantages of {clean_topic}.",
+            f"Write any two important terms related to {clean_topic}.",
+        ],
+        "ten_mark_questions": [
+            f"Explain {clean_topic} with a neat diagram or flow.",
+            f"Describe the working principle of {clean_topic} in detail.",
+            f"Write the advantages, disadvantages, and applications of {clean_topic}.",
+        ],
+        "mcqs": normalize_mcqs([], clean_topic),
+        "flashcards": normalize_flashcards([], clean_topic),
+        "cram_sheet": [
+            f"Revise the definition of {clean_topic}.",
+            "Remember key points in correct order.",
+            "Practice 2-mark and 10-mark questions.",
+            "Use diagrams or flow wherever possible.",
+            "Write final answers neatly with headings.",
+        ],
+        "duration": "AI lecture pack",
+        "accuracy": "Lecture-based" if has_transcript else "Topic-based AI",
     }
+
+
+def build_ai_study_pack(topic: str, transcript: str, source_status: str):
+    clean_topic = topic.strip() if topic and topic.strip() else "Lecture Topic"
+    has_transcript = len(transcript.strip()) > 80
+
+    transcript_for_ai = transcript[:14000].replace("\n", " ").strip()
+
+    content_source = (
+        f"LECTURE TRANSCRIPT:\n{transcript_for_ai}"
+        if has_transcript
+        else "No transcript is available. Generate a useful exam-ready study pack using the topic only."
+    )
+
+    prompt = f"""
+You are VidGen AI, an expert study assistant for Indian engineering students.
+
+Create an exam-ready study pack for this topic:
+{clean_topic}
+
+{content_source}
+
+Return ONLY valid JSON. Do not use markdown. Do not add explanation outside JSON.
+
+JSON format:
+{{
+  "title": "short clean topic title",
+  "summary": "120 to 180 words simple explanation",
+  "notes": [
+    "8 to 12 smart notes in simple exam-ready language"
+  ],
+  "exam_focus": [
+    "5 to 8 high scoring exam focus points"
+  ],
+  "two_mark_questions": [
+    "8 two-mark exam questions"
+  ],
+  "ten_mark_questions": [
+    "5 ten-mark exam questions"
+  ],
+  "mcqs": [
+    {{
+      "question": "MCQ question",
+      "options": ["option A", "option B", "option C", "option D"],
+      "answer": "correct option text"
+    }}
+  ],
+  "flashcards": [
+    {{
+      "front": "question side",
+      "back": "answer side"
+    }}
+  ],
+  "cram_sheet": [
+    "8 last-minute revision points"
+  ]
+}}
+
+Rules:
+- Use simple Indian student-friendly English.
+- Make it useful for B.Tech/ECE style exam preparation.
+- If transcript is available, base the content on the transcript.
+- If transcript is unavailable, create a general but useful study pack from the topic.
+- Keep every point clean, direct, and exam-ready.
+- MCQs must have exactly 4 options each.
+"""
+
+    ai_text = call_gemini(prompt)
+    ai_json = extract_json_from_ai_text(ai_text)
+
+    if not ai_json:
+        return build_demo_study_pack(
+            clean_topic,
+            transcript,
+            source_status + " AI response unavailable, fallback pack generated.",
+        )
+
+    title = str(ai_json.get("title") or clean_topic).strip()
+
+    fallback_pack = build_demo_study_pack(clean_topic, transcript, source_status)
+
+    return {
+        "id": str(uuid.uuid4()),
+        "title": title,
+        "source_status": source_status + " AI generation completed.",
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "summary": str(ai_json.get("summary") or fallback_pack["summary"]).strip(),
+        "notes": normalize_list(ai_json.get("notes"), fallback_pack["notes"]),
+        "exam_focus": normalize_list(ai_json.get("exam_focus"), fallback_pack["exam_focus"]),
+        "two_mark_questions": normalize_list(
+            ai_json.get("two_mark_questions"),
+            fallback_pack["two_mark_questions"],
+        ),
+        "ten_mark_questions": normalize_list(
+            ai_json.get("ten_mark_questions"),
+            fallback_pack["ten_mark_questions"],
+        ),
+        "mcqs": normalize_mcqs(ai_json.get("mcqs"), title),
+        "flashcards": normalize_flashcards(ai_json.get("flashcards"), title),
+        "cram_sheet": normalize_list(ai_json.get("cram_sheet"), fallback_pack["cram_sheet"]),
+        "duration": "AI lecture pack",
+        "accuracy": "AI + transcript" if has_transcript else "AI topic-based",
+    }
+
+
+def ask_ai_tutor(question: str, topic: str, notes: List[str]):
+    clean_question = question.strip()
+    clean_topic = topic.strip() if topic and topic.strip() else "this lecture"
+    notes_context = "\n".join(notes[:8]) if notes else "No generated notes provided."
+
+    prompt = f"""
+You are VidGen AI Tutor for an Indian engineering student.
+
+Topic:
+{clean_topic}
+
+Generated lecture notes:
+{notes_context}
+
+Student question:
+{clean_question}
+
+Answer in simple, clear, exam-ready language.
+Use this structure:
+1. Direct answer
+2. Simple explanation
+3. Exam writing tip
+Keep the answer useful and not too long.
+"""
+
+    ai_text = call_gemini(prompt)
+
+    if ai_text:
+        return ai_text.strip()
+
+    fallback_answer = (
+        f"For {clean_topic}, here is a simple exam-ready explanation: "
+        f"Start with the definition, then explain the main idea step by step. "
+        f"After that, write important points, applications, and a short conclusion. "
+        f"For your doubt: '{clean_question}', focus on clarity, headings, and easy technical words."
+    )
+
+    if notes:
+        fallback_answer += f" Based on your generated notes, the key idea is: {' '.join(notes[:3])}"
+
+    return fallback_answer
 
 
 @app.get("/")
@@ -298,7 +575,9 @@ def root():
     return {
         "message": "VidGen AI Backend is running successfully.",
         "status": "ok",
-        "version": "1.1.0",
+        "version": "2.0.0",
+        "ai_enabled": bool(GEMINI_API_KEY and genai is not None),
+        "model": GEMINI_MODEL,
         "docs": "Open /docs to test APIs.",
     }
 
@@ -308,7 +587,9 @@ def health_check():
     return {
         "status": "healthy",
         "service": "VidGen AI Backend",
-        "version": "1.1.0",
+        "version": "2.0.0",
+        "ai_enabled": bool(GEMINI_API_KEY and genai is not None),
+        "model": GEMINI_MODEL,
     }
 
 
@@ -340,7 +621,7 @@ def generate_study_pack(request: GenerateStudyPackRequest):
 
     transcript, source_status = fetch_youtube_transcript(request.video_url)
 
-    study_pack = build_study_pack(
+    study_pack = build_ai_study_pack(
         topic=request.topic or "Lecture Topic",
         transcript=transcript,
         source_status=source_status,
@@ -348,7 +629,7 @@ def generate_study_pack(request: GenerateStudyPackRequest):
 
     return {
         "success": True,
-        "message": "Study pack generated successfully.",
+        "message": "AI study pack generated successfully.",
         "study_pack": study_pack,
     }
 
@@ -361,21 +642,13 @@ def ask_tutor(request: TutorRequest):
             detail="Question is required.",
         )
 
-    topic = request.topic or "this lecture"
+    topic = request.topic or "Lecture Topic"
 
-    notes_context = ""
-    if request.notes:
-        notes_context = " ".join(request.notes[:3])
-
-    answer = (
-        f"For {topic}, here is a simple exam-ready explanation: "
-        f"Start with the definition, then explain the main idea step by step. "
-        f"After that, write important points, applications, and a short conclusion. "
-        f"For your doubt: '{request.question}', focus on clarity, headings, and easy technical words."
+    answer = ask_ai_tutor(
+        question=request.question,
+        topic=topic,
+        notes=request.notes or [],
     )
-
-    if notes_context:
-        answer += f" Based on your generated notes, the key idea is: {notes_context}"
 
     return {
         "success": True,

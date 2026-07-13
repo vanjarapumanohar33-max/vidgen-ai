@@ -13,6 +13,35 @@ function getFriendlyError(error, fallbackMessage) {
   return fallbackMessage;
 }
 
+function getVideoUrl(payload) {
+  if (typeof payload === "string") {
+    return payload.trim();
+  }
+
+  return (
+    payload?.video_url ||
+    payload?.videoUrl ||
+    payload?.youtubeUrl ||
+    payload?.youtube_url ||
+    payload?.url ||
+    payload?.link ||
+    ""
+  ).trim();
+}
+
+function getTopic(payload) {
+  if (typeof payload === "string") {
+    return "Lecture Topic";
+  }
+
+  return (
+    payload?.topic ||
+    payload?.title ||
+    payload?.lectureTitle ||
+    "Lecture Topic"
+  );
+}
+
 async function requestJson(endpoint, options = {}, timeoutMs = 90000) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -59,8 +88,11 @@ async function requestJson(endpoint, options = {}, timeoutMs = 90000) {
 
 export async function generateStudyPack(payload) {
   try {
-    if (!payload?.video_url || !payload.video_url.trim()) {
-      throw new Error("Please paste a YouTube lecture URL.");
+    const videoUrl = getVideoUrl(payload);
+    const topic = getTopic(payload);
+
+    if (!videoUrl) {
+      throw new Error("Please paste a valid YouTube URL.");
     }
 
     const data = await requestJson(
@@ -68,10 +100,10 @@ export async function generateStudyPack(payload) {
       {
         method: "POST",
         body: JSON.stringify({
-          video_url: payload.video_url,
-          topic: payload.topic || "Lecture Topic",
-          account_type: payload.account_type || "student",
-          plan: payload.plan || "free",
+          video_url: videoUrl,
+          topic,
+          account_type: payload?.account_type || "student",
+          plan: payload?.plan || "free",
         }),
       },
       120000
