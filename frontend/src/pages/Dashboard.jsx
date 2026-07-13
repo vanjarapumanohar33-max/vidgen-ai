@@ -107,37 +107,73 @@ function Dashboard() {
     return `${fullHours} hour${fullHours !== 1 ? "s" : ""} ${minutes} minutes`;
   }
 
+  function extractUrlFromText(inputText) {
+    const text = String(inputText || "").trim();
+
+    if (!text) return "";
+
+    const urlMatch = text.match(
+      /(https?:\/\/)?(www\.|m\.)?(youtube\.com|youtu\.be)\/[^\s]+/i
+    );
+
+    return urlMatch ? urlMatch[0].trim() : text;
+  }
+
   function getVideoId(videoUrl) {
+    const extractedUrl = extractUrlFromText(videoUrl);
+
+    if (!extractedUrl) return null;
+
     try {
-      const cleanUrl = videoUrl.startsWith("http")
-        ? videoUrl
-        : `https://${videoUrl}`;
+      const cleanUrl = extractedUrl.startsWith("http")
+        ? extractedUrl
+        : `https://${extractedUrl}`;
 
       const parsedUrl = new URL(cleanUrl);
+      const hostname = parsedUrl.hostname.toLowerCase().replace("www.", "");
+      const pathname = parsedUrl.pathname;
 
-      if (parsedUrl.hostname.includes("youtube.com")) {
-        if (parsedUrl.pathname.includes("/shorts/")) {
-          return parsedUrl.pathname
-            .split("/shorts/")[1]
-            ?.split("/")[0];
+      if (
+        hostname === "youtube.com" ||
+        hostname === "m.youtube.com" ||
+        hostname === "music.youtube.com"
+      ) {
+        const watchId = parsedUrl.searchParams.get("v");
+
+        if (watchId && /^[a-zA-Z0-9_-]{11}$/.test(watchId)) {
+          return watchId;
         }
 
-        if (parsedUrl.pathname.includes("/embed/")) {
-          return parsedUrl.pathname
-            .split("/embed/")[1]
-            ?.split("/")[0];
+        const pathParts = pathname.split("/").filter(Boolean);
+
+        if (
+          ["shorts", "embed", "live", "v"].includes(pathParts[0]) &&
+          pathParts[1] &&
+          /^[a-zA-Z0-9_-]{11}$/.test(pathParts[1])
+        ) {
+          return pathParts[1];
         }
-
-        return parsedUrl.searchParams.get("v");
       }
 
-      if (parsedUrl.hostname.includes("youtu.be")) {
-        return parsedUrl.pathname.replace("/", "");
+      if (hostname === "youtu.be") {
+        const id = pathname.split("/").filter(Boolean)[0];
+
+        if (id && /^[a-zA-Z0-9_-]{11}$/.test(id)) {
+          return id;
+        }
       }
 
-      return null;
+      const fallbackMatch = cleanUrl.match(
+        /(?:v=|youtu\.be\/|shorts\/|embed\/|live\/)([a-zA-Z0-9_-]{11})/
+      );
+
+      return fallbackMatch ? fallbackMatch[1] : null;
     } catch {
-      return null;
+      const fallbackMatch = extractedUrl.match(
+        /(?:v=|youtu\.be\/|shorts\/|embed\/|live\/)([a-zA-Z0-9_-]{11})/
+      );
+
+      return fallbackMatch ? fallbackMatch[1] : null;
     }
   }
 
@@ -189,18 +225,22 @@ function Dashboard() {
     return "You have used today’s Pro plan limit. Please continue again tomorrow.";
   }
 
-  function saveToRecents(currentVideoId) {
+  function getArray(value, fallback = []) {
+    return Array.isArray(value) && value.length > 0 ? value : fallback;
+  }
+
+  function saveToRecents(currentVideoId, currentUrl, currentPack) {
     const oldRecents = JSON.parse(
       localStorage.getItem("vidgen_recents") || "[]"
     );
 
     const newRecent = {
-      title: "Verified Study Pack",
+      title: currentPack?.title || "Verified Study Pack",
       date: new Date().toLocaleString(),
-      url: url,
+      url: currentUrl,
       videoId: currentVideoId,
-      plan: plan,
-      accountType: accountType,
+      plan,
+      accountType,
     };
 
     localStorage.setItem(
@@ -210,9 +250,10 @@ function Dashboard() {
   }
 
   async function handleGenerate() {
-    const id = getVideoId(url);
+    const cleanUrl = extractUrlFromText(url);
+    const id = getVideoId(cleanUrl);
 
-    if (!id) {
+    if (!cleanUrl || !id) {
       setError("Please paste a valid YouTube URL.");
       return;
     }
@@ -220,7 +261,7 @@ function Dashboard() {
     const dailyLimit = getDailyLimitHours();
     const currentUsed = getUsedHoursToday();
     const remainingHours = dailyLimit - currentUsed;
-    const videoHours = getVideoHoursForDemo(url);
+    const videoHours = getVideoHoursForDemo(cleanUrl);
 
     setUsedHours(currentUsed);
 
@@ -238,6 +279,7 @@ function Dashboard() {
       return;
     }
 
+    setUrl(cleanUrl);
     setError("");
     setPackNotice("");
     setVideoId(id);
@@ -245,18 +287,28 @@ function Dashboard() {
     setShowNotes(false);
     setPanelOpen(false);
     setActivePackTab("notes");
+    setStudyPack(null);
 
     try {
       const result = await generateStudyPack({
-        videoUrl: url,
+        video_url: cleanUrl,
+        videoUrl: cleanUrl,
+        url: cleanUrl,
         topic: "Uploaded Lecture",
+        account_type: accountType,
         accountType,
         plan,
       });
 
-      setStudyPack(result.study_pack);
+      const finalPack = result?.study_pack || result;
+
+      if (!finalPack) {
+        throw new Error("Study pack could not be generated. Please try again.");
+      }
+
+      setStudyPack(finalPack);
       updateUsedHours(videoHours);
-      saveToRecents(id);
+      saveToRecents(id, cleanUrl, finalPack);
       setShowNotes(true);
     } catch (apiError) {
       setError(apiError.message || "Unable to generate study pack right now.");
@@ -286,10 +338,11 @@ function Dashboard() {
   function handleOpenSavedItem(item) {
     setUrl(item.url || "");
     setVideoId(item.videoId || "");
-    setShowNotes(true);
+    setShowNotes(false);
     setLoading(false);
+    setStudyPack(null);
     setError("");
-    setPackNotice("");
+    setPackNotice("Paste/generate again to reload the full study pack.");
     setPanelOpen(false);
     setActivePackTab("notes");
   }
@@ -306,6 +359,30 @@ function Dashboard() {
   const remainingHours = getRemainingHours();
   const mcqCount = getMCQCount();
   const flashcardCount = getFlashcardCount();
+
+  const notes = getArray(studyPack?.notes, [
+    "Generate a study pack to see AI-powered smart notes here.",
+  ]);
+
+  const examFocus = getArray(studyPack?.exam_focus, [
+    "Generate a study pack to see exam-focused points here.",
+  ]);
+
+  const twoMarkQuestions = getArray(studyPack?.two_mark_questions, [
+    "Define the main concept explained in this lecture.",
+    "Write two important applications.",
+    "Mention one key formula or step.",
+  ]);
+
+  const tenMarkQuestions = getArray(studyPack?.ten_mark_questions, [
+    "Explain the concept with neat structure.",
+    "Describe working, diagram, or process if present.",
+    "Compare with related concepts.",
+  ]);
+
+  const mcqs = getArray(studyPack?.mcqs, []);
+  const flashcards = getArray(studyPack?.flashcards, []);
+  const cramSheet = getArray(studyPack?.cram_sheet, []);
 
   const studyTabs = [
     {
@@ -347,40 +424,33 @@ function Dashboard() {
 
             <span className="source-chip">
               <ShieldCheck size={13} />
-              Source based
+              AI generated
             </span>
           </div>
 
           <p>
-            VidGen AI converts the lecture into clear study material so the user
-            can revise faster without depending on random AI answers or scattered
-            YouTube notes.
+            {studyPack?.summary ||
+              "VidGen AI converts the lecture into clear study material so the user can revise faster without depending on random AI answers or scattered YouTube notes."}
           </p>
         </article>
 
         <article className="pack-card">
           <div className="card-top">
             <div>
-              <span className="card-tag">Timestamp Notes</span>
-              <h3>Important points with lecture reference</h3>
+              <span className="card-tag">Smart Notes</span>
+              <h3>Important points from the lecture</h3>
             </div>
           </div>
 
           <div className="timeline-list">
-            <div className="timeline-item">
-              <span className="timestamp-chip">00:00</span>
-              <p>Topic introduction and purpose of the lecture.</p>
-            </div>
-
-            <div className="timeline-item">
-              <span className="timestamp-chip">02:14</span>
-              <p>Main concept explained with examples.</p>
-            </div>
-
-            <div className="timeline-item">
-              <span className="timestamp-chip">05:30</span>
-              <p>Important definitions, steps, or formulas.</p>
-            </div>
+            {notes.slice(0, 6).map((item, index) => (
+              <div className="timeline-item" key={`note-${index}`}>
+                <span className="timestamp-chip">
+                  {String(index + 1).padStart(2, "0")}
+                </span>
+                <p>{item}</p>
+              </div>
+            ))}
           </div>
         </article>
 
@@ -393,10 +463,16 @@ function Dashboard() {
           </div>
 
           <ul className="clean-list">
-            <li>Important definitions</li>
-            <li>Step-by-step explanation</li>
-            <li>Formula or diagram areas if detected</li>
-            <li>Quick revision points</li>
+            {notes.slice(6, 12).length > 0
+              ? notes.slice(6, 12).map((item, index) => (
+                  <li key={`core-${index}`}>{item}</li>
+                ))
+              : [
+                  "Important definitions",
+                  "Step-by-step explanation",
+                  "Formula or diagram areas if detected",
+                  "Quick revision points",
+                ].map((item, index) => <li key={`fallback-core-${index}`}>{item}</li>)}
           </ul>
         </article>
       </div>
@@ -420,11 +496,11 @@ function Dashboard() {
               </span>
             </div>
 
-            <p>
-              Instead of only summarizing, VidGen AI extracts useful takeaways,
-              practical ideas, and next-step learning points from the source
-              video.
-            </p>
+            <ul className="clean-list">
+              {examFocus.map((item, index) => (
+                <li key={`insight-${index}`}>{item}</li>
+              ))}
+            </ul>
           </article>
 
           <article className="pack-card">
@@ -436,9 +512,17 @@ function Dashboard() {
             </div>
 
             <ul className="clean-list">
-              <li>Real-world usage of the concept</li>
-              <li>Important examples from the video</li>
-              <li>Follow-up topics to learn next</li>
+              {cramSheet.length > 0
+                ? cramSheet.slice(0, 5).map((item, index) => (
+                    <li key={`practical-${index}`}>{item}</li>
+                  ))
+                : [
+                    "Real-world usage of the concept",
+                    "Important examples from the video",
+                    "Follow-up topics to learn next",
+                  ].map((item, index) => (
+                    <li key={`fallback-practical-${index}`}>{item}</li>
+                  ))}
             </ul>
           </article>
 
@@ -478,11 +562,11 @@ function Dashboard() {
             </span>
           </div>
 
-          <p>
-            This section turns the lecture into important questions, viva
-            preparation, and quick revision points so students can prepare faster
-            before exams.
-          </p>
+          <ul className="clean-list">
+            {examFocus.map((item, index) => (
+              <li key={`focus-${index}`}>{item}</li>
+            ))}
+          </ul>
         </article>
 
         <article className="pack-card">
@@ -494,9 +578,9 @@ function Dashboard() {
           </div>
 
           <ul className="question-list">
-            <li>Define the main concept explained in this lecture.</li>
-            <li>Write two important applications.</li>
-            <li>Mention one key formula or step.</li>
+            {twoMarkQuestions.slice(0, 8).map((item, index) => (
+              <li key={`two-${index}`}>{item}</li>
+            ))}
           </ul>
         </article>
 
@@ -509,9 +593,9 @@ function Dashboard() {
           </div>
 
           <ul className="question-list">
-            <li>Explain the concept with neat structure.</li>
-            <li>Describe working, diagram, or process if present.</li>
-            <li>Compare with related concepts.</li>
+            {tenMarkQuestions.slice(0, 5).map((item, index) => (
+              <li key={`ten-${index}`}>{item}</li>
+            ))}
           </ul>
         </article>
 
@@ -524,9 +608,17 @@ function Dashboard() {
           </div>
 
           <ul className="question-list">
-            <li>Why is this topic important?</li>
-            <li>Give one practical example.</li>
-            <li>Common mistakes will be highlighted here.</li>
+            {cramSheet.length > 0
+              ? cramSheet.slice(0, 5).map((item, index) => (
+                  <li key={`cram-mini-${index}`}>{item}</li>
+                ))
+              : [
+                  "Why is this topic important?",
+                  "Give one practical example.",
+                  "Common mistakes will be highlighted here.",
+                ].map((item, index) => (
+                  <li key={`fallback-viva-${index}`}>{item}</li>
+                ))}
           </ul>
         </article>
 
@@ -542,10 +634,20 @@ function Dashboard() {
             </span>
           </div>
 
-          <p>
-            A compressed final revision sheet with definitions, important
-            questions, formulas, and memory triggers from the lecture.
-          </p>
+          <ul className="clean-list">
+            {cramSheet.length > 0
+              ? cramSheet.slice(0, 6).map((item, index) => (
+                  <li key={`cram-${index}`}>{item}</li>
+                ))
+              : [
+                  "Definitions",
+                  "Important questions",
+                  "Formula areas",
+                  "Memory triggers",
+                ].map((item, index) => (
+                  <li key={`fallback-cram-${index}`}>{item}</li>
+                ))}
+          </ul>
         </article>
       </div>
     );
@@ -591,50 +693,77 @@ function Dashboard() {
           </div>
 
           <div className="mcq-preview">
-            {[1, 2, 3].map((item) => (
-              <div className="mcq-preview-item" key={item}>
-                <h4>
-                  {item}. Which option best explains an important concept from
-                  this lecture?
-                </h4>
+            {(mcqs.length > 0 ? mcqs.slice(0, 5) : [1, 2, 3]).map(
+              (item, index) => {
+                const isRealMCQ = typeof item === "object";
 
-                <p>A. Basic theory</p>
-                <p>B. Practical example</p>
-                <p>C. Concept application</p>
-                <p>D. All of the above</p>
+                return (
+                  <div className="mcq-preview-item" key={`mcq-${index}`}>
+                    <h4>
+                      {index + 1}.{" "}
+                      {isRealMCQ
+                        ? item.question
+                        : "Which option best explains an important concept from this lecture?"}
+                    </h4>
 
-                {hasGoAccess() ? (
-                  <div className="answer-mini">
-                    <CheckCircle2 size={14} />
-                    Answer key included
-                    {hasProAccess() && " with detailed explanation"}
+                    {isRealMCQ ? (
+                      item.options?.slice(0, 4).map((option, optionIndex) => (
+                        <p key={`mcq-${index}-option-${optionIndex}`}>
+                          {String.fromCharCode(65 + optionIndex)}. {option}
+                        </p>
+                      ))
+                    ) : (
+                      <>
+                        <p>A. Basic theory</p>
+                        <p>B. Practical example</p>
+                        <p>C. Concept application</p>
+                        <p>D. All of the above</p>
+                      </>
+                    )}
+
+                    {hasGoAccess() ? (
+                      <div className="answer-mini">
+                        <CheckCircle2 size={14} />
+                        {isRealMCQ
+                          ? `Answer: ${item.answer}`
+                          : "Answer key included"}
+                        {hasProAccess() && " with detailed explanation"}
+                      </div>
+                    ) : (
+                      <div className="answer-lock-inline">
+                        <Lock size={14} />
+                        Answer key unlocks in Go
+                      </div>
+                    )}
                   </div>
-                ) : (
-                  <div className="answer-lock-inline">
-                    <Lock size={14} />
-                    Answer key unlocks in Go
-                  </div>
-                )}
-              </div>
-            ))}
+                );
+              }
+            )}
           </div>
         </article>
 
         <div className="flashcard-grid">
-          <article className="flashcard">
-            <span className="flashcard-label">Front</span>
-            <h3>What is the main concept of this lecture?</h3>
-            <p>Tap/flip style revision card for quick memory recall.</p>
-          </article>
-
-          <article className="flashcard">
-            <span className="flashcard-label">Back</span>
-            <h3>Lecture-based short answer</h3>
-            <p>
-              The answer will be generated from the video transcript and linked
-              with the study pack.
-            </p>
-          </article>
+          {(flashcards.length > 0
+            ? flashcards.slice(0, 2)
+            : [
+                {
+                  front: "What is the main concept of this lecture?",
+                  back: "Lecture-based short answer will appear here.",
+                },
+                {
+                  front: "How should I revise this topic?",
+                  back: "Use notes, questions, flashcards, and cram sheet.",
+                },
+              ]
+          ).map((card, index) => (
+            <article className="flashcard" key={`flash-${index}`}>
+              <span className="flashcard-label">
+                {index === 0 ? "Front" : "Back"}
+              </span>
+              <h3>{card.front}</h3>
+              <p>{card.back}</p>
+            </article>
+          ))}
         </div>
       </div>
     );
@@ -648,16 +777,8 @@ function Dashboard() {
 
     try {
       setIsExportingPDF(true);
-      await exportStudyPackPDF({
-        title: studyPack.title || "VidGen Study Pack",
-        summary: studyPack.summary || "Generated VidGen AI study pack.",
-        notes: studyPack.notes || [],
-        examFocus: studyPack.exam_focus || [],
-        questions: [
-          ...(studyPack.two_mark_questions || []),
-          ...(studyPack.ten_mark_questions || []),
-        ],
-      });
+      await exportStudyPackPDF(studyPack);
+      setPackNotice("PDF export started successfully.");
     } catch (apiError) {
       setPackNotice(apiError.message || "Unable to export PDF right now.");
     } finally {
@@ -695,6 +816,10 @@ function Dashboard() {
               studyPack.title || "VidGen Study Pack",
               studyPack.summary || "",
               ...(studyPack.notes || []),
+              ...(studyPack.exam_focus || []),
+              ...(studyPack.two_mark_questions || []),
+              ...(studyPack.ten_mark_questions || []),
+              ...(studyPack.cram_sheet || []),
             ].join("\n\n");
 
             navigator.clipboard.writeText(copiedNotes);
@@ -702,7 +827,11 @@ function Dashboard() {
             return;
           }
 
-          if (title.toLowerCase().includes("pdf") || title === "Full Study Pack" || title === "Cram Sheet") {
+          if (
+            title.toLowerCase().includes("pdf") ||
+            title === "Full Study Pack" ||
+            title === "Cram Sheet"
+          ) {
             handleExportPDF();
           }
         }}
@@ -845,7 +974,9 @@ function Dashboard() {
               }}
             />
 
-            <button onClick={handleGenerate}>Generate</button>
+            <button onClick={handleGenerate} disabled={loading}>
+              {loading ? "Generating..." : "Generate"}
+            </button>
           </div>
 
           {error && <span className="error-text">{error}</span>}
@@ -864,7 +995,7 @@ function Dashboard() {
         {loading && (
           <section className="loading-line">
             <span className="tiny-loader"></span>
-            <p>Building your verified study pack...</p>
+            <p>Building your verified AI study pack...</p>
           </section>
         )}
 
@@ -880,8 +1011,8 @@ function Dashboard() {
                 <h2>{studyPack?.title || "Verified Study Pack"}</h2>
 
                 <p>
-                  Structured notes, exam focus, practice, and exports generated
-                  from your lecture source.
+                  {studyPack?.source_status ||
+                    "Structured notes, exam focus, practice, and exports generated from your lecture source."}
                 </p>
               </div>
 
@@ -912,7 +1043,7 @@ function Dashboard() {
 
               <div className="trust-item">
                 <Clock size={15} />
-                <span>Timestamp-ready</span>
+                <span>{studyPack?.generated_at || "Generated now"}</span>
               </div>
 
               <div className="trust-item">
@@ -922,7 +1053,7 @@ function Dashboard() {
 
               <div className="trust-item">
                 <Brain size={15} />
-                <span>Tutor limited to this lecture</span>
+                <span>{studyPack?.accuracy || "AI assisted"}</span>
               </div>
             </div>
 
