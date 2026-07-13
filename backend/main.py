@@ -34,11 +34,13 @@ except Exception:
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
 
+TRANSCRIPT_LANGUAGES = ["en", "en-US", "en-GB", "te", "hi"]
+
 
 app = FastAPI(
     title="VidGen AI Backend",
-    description="AI-powered backend server for VidGen AI lecture-to-study-pack generation.",
-    version="2.0.0",
+    description="Transcript-first AI backend server for VidGen AI lecture study packs.",
+    version="2.1.0",
 )
 
 app.add_middleware(
@@ -48,7 +50,7 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "https://vidgen-ai.vercel.app",
     ],
-    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_origin_regex=r"https://.*\\.vercel\\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -57,7 +59,7 @@ app.add_middleware(
 
 class GenerateStudyPackRequest(BaseModel):
     video_url: str
-    topic: Optional[str] = "Lecture Topic"
+    topic: Optional[str] = "Uploaded Lecture"
     account_type: Optional[str] = "student"
     plan: Optional[str] = "free"
 
@@ -131,7 +133,7 @@ def extract_youtube_video_id(url: str) -> Optional[str]:
 
     fallback_patterns = [
         r"(?:v=)([a-zA-Z0-9_-]{11})",
-        r"(?:youtu\.be/)([a-zA-Z0-9_-]{11})",
+        r"(?:youtu\\.be/)([a-zA-Z0-9_-]{11})",
         r"(?:shorts/)([a-zA-Z0-9_-]{11})",
         r"(?:embed/)([a-zA-Z0-9_-]{11})",
         r"(?:live/)([a-zA-Z0-9_-]{11})",
@@ -145,7 +147,32 @@ def extract_youtube_video_id(url: str) -> Optional[str]:
     return None
 
 
-def fetch_youtube_transcript(video_url: str) -> tuple[str, str]:
+def transcript_to_text(fetched_transcript) -> str:
+    if not fetched_transcript:
+        return ""
+
+    try:
+        raw_data = fetched_transcript.to_raw_data()
+        return " ".join(item.get("text", "") for item in raw_data).strip()
+    except Exception:
+        pass
+
+    try:
+        return " ".join(
+            getattr(snippet, "text", "") for snippet in fetched_transcript
+        ).strip()
+    except Exception:
+        pass
+
+    try:
+        return " ".join(
+            item.get("text", "") for item in fetched_transcript
+        ).strip()
+    except Exception:
+        return ""
+
+
+def fetch_youtube_transcript(video_url: str) -> tuple[str, str, bool]:
     video_id = extract_youtube_video_id(video_url)
 
     if not video_id:
@@ -155,27 +182,80 @@ def fetch_youtube_transcript(video_url: str) -> tuple[str, str]:
         )
 
     if YouTubeTranscriptApi is None:
-        return "", "Transcript package unavailable. AI generated content from topic only."
+        raise HTTPException(
+            status_code=500,
+            detail="Transcript package is not installed on backend.",
+        )
+
+    ytt_api = YouTubeTranscriptApi()
 
     try:
-        transcript_items = YouTubeTranscriptApi.get_transcript(
+        fetched_transcript = ytt_api.fetch(
             video_id,
-            languages=["en", "en-US", "en-GB", "hi", "te"],
+            languages=TRANSCRIPT_LANGUAGES,
         )
 
-        transcript_text = " ".join(
-            item.get("text", "") for item in transcript_items
-        )
+        transcript_text = transcript_to_text(fetched_transcript)
 
-        transcript_text = transcript_text.strip()
-
-        if transcript_text:
-            return transcript_text, "YouTube transcript detected and processed."
-
-        return "", "Transcript was empty. AI generated content from topic only."
-
+        if len(transcript_text) > 80:
+            return (
+                transcript_text,
+                "YouTube transcript detected and processed.",
+                True,
+            )
     except Exception:
-        return "", "Transcript unavailable for this video. AI generated content from topic only."
+        pass
+
+    try:
+        transcript_list = ytt_api.list(video_id)
+
+        selected_transcript = None
+
+        try:
+            selected_transcript = transcript_list.find_transcript(
+                TRANSCRIPT_LANGUAGES
+            )
+        except Exception:
+            pass
+
+        if selected_transcript is None:
+            for transcript in transcript_list:
+                selected_transcript = transcript
+                break
+
+        if selected_transcript is None:
+            raise Exception("No transcript found.")
+
+        try:
+            if (
+                getattr(selected_transcript, "language_code", "") != "en"
+                and getattr(selected_transcript, "is_translatable", False)
+            ):
+                selected_transcript = selected_transcript.translate("en")
+        except Exception:
+            pass
+
+        fetched_transcript = selected_transcript.fetch()
+        transcript_text = transcript_to_text(fetched_transcript)
+
+        if len(transcript_text) > 80:
+            language_code = getattr(selected_transcript, "language_code", "unknown")
+
+            return (
+                transcript_text,
+                f"YouTube transcript detected and processed. Language: {language_code}.",
+                True,
+            )
+    except Exception:
+        pass
+
+    raise HTTPException(
+        status_code=422,
+        detail=(
+            "Transcript is unavailable for this video, so VidGen AI cannot generate a trusted video-based study pack. "
+            "Try a YouTube lecture with captions/subtitles enabled."
+        ),
+    )
 
 
 def get_gemini_client():
@@ -210,7 +290,6 @@ def call_gemini(prompt: str) -> Optional[str]:
 
         if output_text:
             return output_text.strip()
-
     except Exception:
         pass
 
@@ -224,7 +303,6 @@ def call_gemini(prompt: str) -> Optional[str]:
 
         if output_text:
             return output_text.strip()
-
     except Exception:
         pass
 
@@ -236,7 +314,6 @@ def extract_json_from_ai_text(text: str) -> Optional[dict]:
         return None
 
     cleaned = text.strip()
-
     cleaned = cleaned.replace("```json", "").replace("```", "").strip()
 
     try:
@@ -245,7 +322,7 @@ def extract_json_from_ai_text(text: str) -> Optional[dict]:
         pass
 
     try:
-        match = re.search(r"\{[\s\S]*\}", cleaned)
+        match = re.search(r"\\{[\\s\\S]*\\}", cleaned)
         if match:
             return json.loads(match.group(0))
     except Exception:
@@ -256,7 +333,9 @@ def extract_json_from_ai_text(text: str) -> Optional[dict]:
 
 def normalize_list(value, fallback):
     if isinstance(value, list) and len(value) > 0:
-        return [str(item).strip() for item in value if str(item).strip()]
+        clean_items = [str(item).strip() for item in value if str(item).strip()]
+        if clean_items:
+            return clean_items
 
     return fallback
 
@@ -287,35 +366,15 @@ def normalize_mcqs(value, topic):
 
     return [
         {
-            "question": f"What is the first step to understand {topic}?",
+            "question": f"What is the main concept explained in {topic}?",
             "options": [
-                "Learn the definition",
-                "Skip the basics",
-                "Only memorize formulas",
-                "Ignore examples",
+                "Definition and working",
+                "Only unrelated examples",
+                "No explanation",
+                "Random facts",
             ],
-            "answer": "Learn the definition",
-        },
-        {
-            "question": "Which format is best for exam answers?",
-            "options": [
-                "Step-by-step points",
-                "One long paragraph",
-                "Only keywords",
-                "No headings",
-            ],
-            "answer": "Step-by-step points",
-        },
-        {
-            "question": "Which section helps in last-minute revision?",
-            "options": [
-                "Cram sheet",
-                "Random notes",
-                "Unverified content",
-                "Only long answers",
-            ],
-            "answer": "Cram sheet",
-        },
+            "answer": "Definition and working",
+        }
     ]
 
 
@@ -343,149 +402,111 @@ def normalize_flashcards(value, topic):
 
     return [
         {
-            "front": f"What is {topic}?",
-            "back": f"{topic} should be explained with definition, working principle, important points, and applications.",
-        },
-        {
-            "front": "How to write a 10-mark answer?",
-            "back": "Use heading, definition, diagram or flow, explanation, advantages, applications, and conclusion.",
-        },
+            "front": f"What is the key idea of {topic}?",
+            "back": "Read the smart notes and exam focus generated from the transcript.",
+        }
     ]
 
 
-def build_demo_study_pack(topic: str, transcript: str, source_status: str):
-    clean_topic = topic.strip() if topic and topic.strip() else "Lecture Topic"
-    has_transcript = len(transcript.strip()) > 80
-
-    summary = (
-        f"This study pack explains {clean_topic} in a clean, exam-focused way. "
-        f"It is arranged for quick revision, short-answer preparation, long-answer structure, "
-        f"practice questions, and last-minute review."
-    )
-
-    if has_transcript:
-        summary = (
-            f"This study pack is generated using the available YouTube transcript for {clean_topic}. "
-            f"The content is arranged into exam-focused notes, revision points, practice questions, "
-            f"and a short cram sheet for faster preparation."
-        )
-
-    notes = [
-        f"Start {clean_topic} with a clear definition and basic meaning.",
-        f"Understand the working principle step by step instead of memorizing random points.",
-        f"Write important terms, formulas, diagrams, and examples separately for fast revision.",
-        f"For problem-based topics, follow this order: given data, formula, substitution, calculation, and final answer.",
-        f"Use headings and short technical sentences to make answers look neat in exams.",
-    ]
-
-    if has_transcript:
-        transcript_preview = transcript[:700].replace("\n", " ").strip()
-
-        notes.insert(
-            1,
-            f"Lecture context detected: {transcript_preview}...",
-        )
+def fallback_transcript_pack(topic: str, transcript: str, source_status: str):
+    clean_topic = topic.strip() if topic and topic.strip() else "Uploaded Lecture"
+    transcript_preview = transcript[:900].replace("\n", " ").strip()
 
     return {
         "id": str(uuid.uuid4()),
         "title": clean_topic,
-        "source_status": source_status,
+        "source_status": source_status + " AI response failed, transcript fallback used.",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "summary": summary,
-        "notes": notes,
+        "summary": transcript_preview,
+        "notes": [
+            "Transcript was detected, but AI formatting failed.",
+            "Use the transcript preview to revise the main idea.",
+            "Try generating again after a few seconds.",
+        ],
         "exam_focus": [
-            f"Prepare a perfect 2-mark definition of {clean_topic}.",
-            "Prepare one 10-mark answer with heading, diagram or flow, explanation, applications, and conclusion.",
-            "Revise advantages, disadvantages, applications, key terms, and repeated question patterns.",
-            "Practice writing the answer in 5 to 6 clear points.",
+            "Read the transcript summary carefully.",
+            "Prepare definitions and key terms from the lecture.",
+            "Write answers using headings and step-by-step points.",
         ],
         "two_mark_questions": [
-            f"Define {clean_topic}.",
-            f"Write two applications of {clean_topic}.",
-            f"Mention two advantages of {clean_topic}.",
-            f"Write any two important terms related to {clean_topic}.",
+            "What is the main topic discussed in this lecture?",
+            "Write two important points from the lecture.",
+            "Mention one application from the lecture.",
         ],
         "ten_mark_questions": [
-            f"Explain {clean_topic} with a neat diagram or flow.",
-            f"Describe the working principle of {clean_topic} in detail.",
-            f"Write the advantages, disadvantages, and applications of {clean_topic}.",
+            "Explain the main concept discussed in this lecture.",
+            "Write detailed notes from the lecture transcript.",
         ],
         "mcqs": normalize_mcqs([], clean_topic),
         "flashcards": normalize_flashcards([], clean_topic),
         "cram_sheet": [
-            f"Revise the definition of {clean_topic}.",
-            "Remember key points in correct order.",
-            "Practice 2-mark and 10-mark questions.",
-            "Use diagrams or flow wherever possible.",
-            "Write final answers neatly with headings.",
+            "Revise transcript summary.",
+            "Mark important definitions.",
+            "Prepare 2-mark and 10-mark answers.",
         ],
-        "duration": "AI lecture pack",
-        "accuracy": "Lecture-based" if has_transcript else "Topic-based AI",
+        "duration": "Transcript-based lecture pack",
+        "accuracy": "Transcript-based fallback",
     }
 
 
 def build_ai_study_pack(topic: str, transcript: str, source_status: str):
-    clean_topic = topic.strip() if topic and topic.strip() else "Lecture Topic"
-    has_transcript = len(transcript.strip()) > 80
-
-    transcript_for_ai = transcript[:14000].replace("\n", " ").strip()
-
-    content_source = (
-        f"LECTURE TRANSCRIPT:\n{transcript_for_ai}"
-        if has_transcript
-        else "No transcript is available. Generate a useful exam-ready study pack using the topic only."
-    )
+    clean_topic = topic.strip() if topic and topic.strip() else "Uploaded Lecture"
+    transcript_for_ai = transcript[:18000].replace("\n", " ").strip()
 
     prompt = f"""
-You are VidGen AI, an expert study assistant for Indian engineering students.
+You are VidGen AI, a transcript-first study assistant for Indian engineering students.
 
-Create an exam-ready study pack for this topic:
+You MUST use only the lecture transcript below.
+Do NOT create generic content.
+Do NOT add unrelated concepts.
+If the transcript does not clearly mention something, do not invent it.
+
+Topic label:
 {clean_topic}
 
-{content_source}
+LECTURE TRANSCRIPT:
+{transcript_for_ai}
 
 Return ONLY valid JSON. Do not use markdown. Do not add explanation outside JSON.
 
 JSON format:
 {{
-  "title": "short clean topic title",
-  "summary": "120 to 180 words simple explanation",
+  "title": "short clean topic title based on transcript",
+  "summary": "120 to 180 words summary strictly based on transcript",
   "notes": [
-    "8 to 12 smart notes in simple exam-ready language"
+    "8 to 12 smart notes strictly from transcript"
   ],
   "exam_focus": [
-    "5 to 8 high scoring exam focus points"
+    "5 to 8 exam focus points strictly from transcript"
   ],
   "two_mark_questions": [
-    "8 two-mark exam questions"
+    "8 two-mark questions answerable from transcript"
   ],
   "ten_mark_questions": [
-    "5 ten-mark exam questions"
+    "5 ten-mark questions answerable from transcript"
   ],
   "mcqs": [
     {{
-      "question": "MCQ question",
+      "question": "MCQ question from transcript",
       "options": ["option A", "option B", "option C", "option D"],
       "answer": "correct option text"
     }}
   ],
   "flashcards": [
     {{
-      "front": "question side",
-      "back": "answer side"
+      "front": "question side from transcript",
+      "back": "answer side from transcript"
     }}
   ],
   "cram_sheet": [
-    "8 last-minute revision points"
+    "8 last-minute revision points strictly from transcript"
   ]
 }}
 
 Rules:
-- Use simple Indian student-friendly English.
-- Make it useful for B.Tech/ECE style exam preparation.
-- If transcript is available, base the content on the transcript.
-- If transcript is unavailable, create a general but useful study pack from the topic.
-- Keep every point clean, direct, and exam-ready.
+- Simple Indian student-friendly English.
+- Useful for B.Tech/ECE-style exam preparation when possible.
+- Every point must be traceable to the transcript.
 - MCQs must have exactly 4 options each.
 """
 
@@ -493,20 +514,15 @@ Rules:
     ai_json = extract_json_from_ai_text(ai_text)
 
     if not ai_json:
-        return build_demo_study_pack(
-            clean_topic,
-            transcript,
-            source_status + " AI response unavailable, fallback pack generated.",
-        )
+        return fallback_transcript_pack(clean_topic, transcript, source_status)
 
+    fallback_pack = fallback_transcript_pack(clean_topic, transcript, source_status)
     title = str(ai_json.get("title") or clean_topic).strip()
-
-    fallback_pack = build_demo_study_pack(clean_topic, transcript, source_status)
 
     return {
         "id": str(uuid.uuid4()),
         "title": title,
-        "source_status": source_status + " AI generation completed.",
+        "source_status": source_status + " AI transcript-based generation completed.",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "summary": str(ai_json.get("summary") or fallback_pack["summary"]).strip(),
         "notes": normalize_list(ai_json.get("notes"), fallback_pack["notes"]),
@@ -522,18 +538,22 @@ Rules:
         "mcqs": normalize_mcqs(ai_json.get("mcqs"), title),
         "flashcards": normalize_flashcards(ai_json.get("flashcards"), title),
         "cram_sheet": normalize_list(ai_json.get("cram_sheet"), fallback_pack["cram_sheet"]),
-        "duration": "AI lecture pack",
-        "accuracy": "AI + transcript" if has_transcript else "AI topic-based",
+        "duration": "Transcript-based lecture pack",
+        "accuracy": "AI + transcript verified",
     }
 
 
 def ask_ai_tutor(question: str, topic: str, notes: List[str]):
     clean_question = question.strip()
     clean_topic = topic.strip() if topic and topic.strip() else "this lecture"
-    notes_context = "\n".join(notes[:8]) if notes else "No generated notes provided."
+    notes_context = "\n".join(notes[:10]) if notes else "No generated notes provided."
 
     prompt = f"""
-You are VidGen AI Tutor for an Indian engineering student.
+You are VidGen AI Tutor.
+
+Answer only using the generated notes below.
+If the answer is not available in the notes, say:
+"This answer is not clearly available from the generated lecture notes."
 
 Topic:
 {clean_topic}
@@ -545,11 +565,10 @@ Student question:
 {clean_question}
 
 Answer in simple, clear, exam-ready language.
-Use this structure:
+Use:
 1. Direct answer
 2. Simple explanation
 3. Exam writing tip
-Keep the answer useful and not too long.
 """
 
     ai_text = call_gemini(prompt)
@@ -557,17 +576,10 @@ Keep the answer useful and not too long.
     if ai_text:
         return ai_text.strip()
 
-    fallback_answer = (
-        f"For {clean_topic}, here is a simple exam-ready explanation: "
-        f"Start with the definition, then explain the main idea step by step. "
-        f"After that, write important points, applications, and a short conclusion. "
-        f"For your doubt: '{clean_question}', focus on clarity, headings, and easy technical words."
+    return (
+        f"For {clean_topic}, I can answer only from the generated lecture notes. "
+        f"Your question was: {clean_question}. Please regenerate the pack or ask from the notes shown."
     )
-
-    if notes:
-        fallback_answer += f" Based on your generated notes, the key idea is: {' '.join(notes[:3])}"
-
-    return fallback_answer
 
 
 @app.get("/")
@@ -575,9 +587,10 @@ def root():
     return {
         "message": "VidGen AI Backend is running successfully.",
         "status": "ok",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "ai_enabled": bool(GEMINI_API_KEY and genai is not None),
         "model": GEMINI_MODEL,
+        "transcript_first": True,
         "docs": "Open /docs to test APIs.",
     }
 
@@ -587,9 +600,10 @@ def health_check():
     return {
         "status": "healthy",
         "service": "VidGen AI Backend",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "ai_enabled": bool(GEMINI_API_KEY and genai is not None),
         "model": GEMINI_MODEL,
+        "transcript_first": True,
     }
 
 
@@ -611,6 +625,38 @@ def youtube_url_check(url: str):
     }
 
 
+@app.get("/api/transcript-debug")
+def transcript_debug(url: str):
+    video_id = extract_youtube_video_id(url)
+
+    if not video_id:
+        return {
+            "valid_url": False,
+            "video_id": None,
+            "transcript_available": False,
+            "message": "Invalid YouTube URL.",
+        }
+
+    try:
+        transcript, source_status, transcript_available = fetch_youtube_transcript(url)
+
+        return {
+            "valid_url": True,
+            "video_id": video_id,
+            "transcript_available": transcript_available,
+            "transcript_length": len(transcript),
+            "source_status": source_status,
+            "preview": transcript[:700],
+        }
+    except HTTPException as error:
+        return {
+            "valid_url": True,
+            "video_id": video_id,
+            "transcript_available": False,
+            "message": error.detail,
+        }
+
+
 @app.post("/api/generate-study-pack")
 def generate_study_pack(request: GenerateStudyPackRequest):
     if not request.video_url or not request.video_url.strip():
@@ -619,17 +665,25 @@ def generate_study_pack(request: GenerateStudyPackRequest):
             detail="YouTube lecture URL is required.",
         )
 
-    transcript, source_status = fetch_youtube_transcript(request.video_url)
+    transcript, source_status, transcript_available = fetch_youtube_transcript(
+        request.video_url
+    )
+
+    if not transcript_available:
+        raise HTTPException(
+            status_code=422,
+            detail="Transcript unavailable. Cannot generate trusted video-based content.",
+        )
 
     study_pack = build_ai_study_pack(
-        topic=request.topic or "Lecture Topic",
+        topic=request.topic or "Uploaded Lecture",
         transcript=transcript,
         source_status=source_status,
     )
 
     return {
         "success": True,
-        "message": "AI study pack generated successfully.",
+        "message": "Transcript-based AI study pack generated successfully.",
         "study_pack": study_pack,
     }
 
