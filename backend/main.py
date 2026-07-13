@@ -4,6 +4,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
+from urllib.parse import urlparse, parse_qs
 import os
 import re
 import uuid
@@ -23,17 +24,18 @@ except Exception:
 
 app = FastAPI(
     title="VidGen AI Backend",
-    description="Backend server for VidGen AI lecture-to-study-pack generation.",
-    version="1.0.0",
+    description="Production-ready backend server for VidGen AI lecture-to-study-pack generation.",
+    version="1.1.0",
 )
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "https://vidgen-ai.vercel.app",
-],
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "https://vidgen-ai.vercel.app",
+    ],
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -61,63 +63,125 @@ class ExportPDFRequest(BaseModel):
     questions: List[str]
 
 
-def extract_youtube_video_id(url: str) -> Optional[str]:
-    patterns = [
-        r"youtube\.com/watch\?v=([^&]+)",
-        r"youtu\.be/([^?&]+)",
-        r"youtube\.com/embed/([^?&]+)",
-        r"youtube\.com/shorts/([^?&]+)",
-    ]
+def clean_video_id(video_id: str) -> Optional[str]:
+    if not video_id:
+        return None
 
-    for pattern in patterns:
-        match = re.search(pattern, url)
+    video_id = video_id.strip()
 
-        if match:
-            return match.group(1)
+    video_id = video_id.split("?")[0]
+    video_id = video_id.split("&")[0]
+    video_id = video_id.split("/")[0]
+
+    if re.fullmatch(r"[a-zA-Z0-9_-]{11}", video_id):
+        return video_id
 
     return None
 
 
-def fetch_youtube_transcript(video_url: str) -> str:
+def extract_youtube_video_id(url: str) -> Optional[str]:
+    if not url:
+        return None
+
+    raw_url = url.strip()
+
+    if not raw_url:
+        return None
+
+    if "youtube.com" not in raw_url and "youtu.be" not in raw_url:
+        return None
+
+    if not raw_url.startswith(("http://", "https://")):
+        raw_url = "https://" + raw_url
+
+    try:
+        parsed_url = urlparse(raw_url)
+        host = parsed_url.netloc.lower().replace("www.", "")
+        path_parts = [part for part in parsed_url.path.split("/") if part]
+        query_params = parse_qs(parsed_url.query)
+
+        if host in ["youtube.com", "m.youtube.com", "music.youtube.com"]:
+            if "v" in query_params:
+                return clean_video_id(query_params["v"][0])
+
+            if path_parts:
+                first_part = path_parts[0]
+
+                if first_part in ["shorts", "embed", "live", "v"] and len(path_parts) >= 2:
+                    return clean_video_id(path_parts[1])
+
+        if host == "youtu.be":
+            if path_parts:
+                return clean_video_id(path_parts[0])
+
+    except Exception:
+        return None
+
+    fallback_patterns = [
+        r"(?:v=)([a-zA-Z0-9_-]{11})",
+        r"(?:youtu\.be/)([a-zA-Z0-9_-]{11})",
+        r"(?:shorts/)([a-zA-Z0-9_-]{11})",
+        r"(?:embed/)([a-zA-Z0-9_-]{11})",
+        r"(?:live/)([a-zA-Z0-9_-]{11})",
+    ]
+
+    for pattern in fallback_patterns:
+        match = re.search(pattern, raw_url)
+        if match:
+            return clean_video_id(match.group(1))
+
+    return None
+
+
+def fetch_youtube_transcript(video_url: str) -> tuple[str, str]:
     video_id = extract_youtube_video_id(video_url)
 
     if not video_id:
-        return ""
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid YouTube URL. Please paste a valid YouTube video, shorts, live, embed, or youtu.be link.",
+        )
 
     if YouTubeTranscriptApi is None:
-        return ""
+        return "", "Transcript package is unavailable. Demo study pack generated from topic."
 
     try:
         transcript_items = YouTubeTranscriptApi.get_transcript(
             video_id,
-            languages=["en", "en-US", "hi", "te"],
+            languages=["en", "en-US", "en-GB", "hi", "te"],
         )
 
         transcript_text = " ".join(
             item.get("text", "") for item in transcript_items
         )
 
-        return transcript_text.strip()
+        transcript_text = transcript_text.strip()
+
+        if transcript_text:
+            return transcript_text, "YouTube transcript detected and processed."
+
+        return "", "Transcript was empty. Demo study pack generated from topic."
 
     except Exception:
-        return ""
+        return "", "Transcript unavailable for this video. Demo study pack generated from topic."
 
 
-def build_study_pack(topic: str, transcript: str):
-    clean_topic = topic.strip() if topic else "Lecture Topic"
+def build_study_pack(topic: str, transcript: str, source_status: str):
+    clean_topic = topic.strip() if topic and topic.strip() else "Lecture Topic"
     has_transcript = len(transcript.strip()) > 80
-
-    source_status = (
-        "YouTube transcript detected and processed."
-        if has_transcript
-        else "Transcript unavailable. Demo study pack generated from topic."
-    )
 
     summary = (
         f"This study pack explains {clean_topic} in a clean, exam-focused way. "
         f"It is arranged for quick revision, short-answer preparation, long-answer structure, "
         f"practice questions, and last-minute review."
     )
+
+    if has_transcript:
+        summary = (
+            f"This study pack is generated using the available YouTube transcript for {clean_topic}. "
+            f"The content is arranged into exam-focused notes, revision points, practice questions, "
+            f"and a short cram sheet for faster preparation."
+        )
 
     notes = [
         f"Start {clean_topic} with a clear definition and basic meaning.",
@@ -126,6 +190,14 @@ def build_study_pack(topic: str, transcript: str):
         f"For problem-based topics, follow this order: given data, formula, substitution, calculation, and final answer.",
         f"Use headings and short technical sentences to make answers look neat in exams.",
     ]
+
+    if has_transcript:
+        transcript_preview = transcript[:700].replace("\n", " ").strip()
+
+        notes.insert(
+            1,
+            f"Lecture context detected: {transcript_preview}...",
+        )
 
     exam_focus = [
         f"Prepare a perfect 2-mark definition of {clean_topic}.",
@@ -226,7 +298,8 @@ def root():
     return {
         "message": "VidGen AI Backend is running successfully.",
         "status": "ok",
-        "docs": "Open http://127.0.0.1:8000/docs",
+        "version": "1.1.0",
+        "docs": "Open /docs to test APIs.",
     }
 
 
@@ -235,22 +308,42 @@ def health_check():
     return {
         "status": "healthy",
         "service": "VidGen AI Backend",
+        "version": "1.1.0",
+    }
+
+
+@app.get("/api/youtube-url-check")
+def youtube_url_check(url: str):
+    video_id = extract_youtube_video_id(url)
+
+    if not video_id:
+        return {
+            "valid": False,
+            "message": "Invalid YouTube URL.",
+            "video_id": None,
+        }
+
+    return {
+        "valid": True,
+        "message": "Valid YouTube URL.",
+        "video_id": video_id,
     }
 
 
 @app.post("/api/generate-study-pack")
 def generate_study_pack(request: GenerateStudyPackRequest):
-    if not request.video_url.strip():
+    if not request.video_url or not request.video_url.strip():
         raise HTTPException(
             status_code=400,
             detail="YouTube lecture URL is required.",
         )
 
-    transcript = fetch_youtube_transcript(request.video_url)
+    transcript, source_status = fetch_youtube_transcript(request.video_url)
 
     study_pack = build_study_pack(
         topic=request.topic or "Lecture Topic",
         transcript=transcript,
+        source_status=source_status,
     )
 
     return {
@@ -262,7 +355,7 @@ def generate_study_pack(request: GenerateStudyPackRequest):
 
 @app.post("/api/ask-tutor")
 def ask_tutor(request: TutorRequest):
-    if not request.question.strip():
+    if not request.question or not request.question.strip():
         raise HTTPException(
             status_code=400,
             detail="Question is required.",
