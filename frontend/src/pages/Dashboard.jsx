@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   MessageCircle,
   Download,
@@ -27,6 +27,7 @@ import {
   exportStudyPackPDF,
   generateStudyPack,
   generateStudyPackFromUpload,
+  getUsageStatus,
 } from "../api/vidgenApi";
 
 import "./Dashboard.css";
@@ -52,7 +53,24 @@ function Dashboard() {
   const [activePackTab, setActivePackTab] = useState("notes");
   const [studyPack, setStudyPack] = useState(null);
   const [isExportingPDF, setIsExportingPDF] = useState(false);
-  const [usedHours, setUsedHours] = useState(() => getUsedHoursToday());
+  const [usedHours, setUsedHours] = useState(0);
+
+  useEffect(() => {
+    async function loadBackendUsage() {
+      try {
+        const status = await getUsageStatus(plan);
+        const backendUsedHours = Number(status?.used_hours || 0);
+
+        if (!Number.isNaN(backendUsedHours)) {
+          setUsedHours(backendUsedHours);
+        }
+      } catch {
+        setUsedHours(0);
+      }
+    }
+
+    loadBackendUsage();
+  }, [plan]);
 
   function getDailyLimitHours() {
     if (accountType === "student") {
@@ -63,45 +81,18 @@ function Dashboard() {
 
     if (accountType === "learner") {
       if (plan === "Go") return 10;
-      if (plan === "Pro") return 20;
+      if (plan === "Pro") return 16;
       return 4;
     }
 
     return 4;
   }
 
-  function getTodayKey() {
-    return new Date().toISOString().split("T")[0];
-  }
-
-  function getUsedHoursToday() {
-    const today = new Date().toISOString().split("T")[0];
-    const savedDate = localStorage.getItem("vidgen_usage_date");
-
-    if (savedDate !== today) {
-      localStorage.setItem("vidgen_usage_date", today);
-      localStorage.setItem("vidgen_used_hours", "0");
-      return 0;
-    }
-
-    return Number(localStorage.getItem("vidgen_used_hours") || "0");
-  }
-
-  function updateUsedHours(videoHours) {
-    const today = getTodayKey();
-    const currentUsed = getUsedHoursToday();
-    const updatedUsed = currentUsed + videoHours;
-
-    localStorage.setItem("vidgen_usage_date", today);
-    localStorage.setItem("vidgen_used_hours", String(updatedUsed));
-
-    setUsedHours(updatedUsed);
-  }
-
   function formatHours(hours) {
-    const safeHours = Math.max(0, hours);
-    const fullHours = Math.floor(safeHours);
-    const minutes = Math.round((safeHours - fullHours) * 60);
+    const safeHours = Math.max(0, Number(hours || 0));
+    const totalMinutes = Math.round(safeHours * 60);
+    const fullHours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
 
     if (fullHours <= 0) {
       return `${minutes} minute${minutes !== 1 ? "s" : ""}`;
@@ -184,18 +175,6 @@ function Dashboard() {
     }
   }
 
-  function getVideoHoursForDemo(videoUrl) {
-    const hoursMatch =
-      videoUrl.match(/[?&]hours=(\d+(\.\d+)?)/i) ||
-      videoUrl.match(/#hours=(\d+(\.\d+)?)/i);
-
-    if (hoursMatch) {
-      return Number(hoursMatch[1]);
-    }
-
-    return 1;
-  }
-
   function getRemainingHours() {
     return getDailyLimitHours() - usedHours;
   }
@@ -220,20 +199,20 @@ function Dashboard() {
     return plan === "Pro";
   }
 
-  function getLimitErrorMessage() {
-    if (plan === "Free") {
-      return "You have used your free daily limit. Upgrade to Go or Pro to continue learning today.";
-    }
-
-    if (plan === "Go") {
-      return "You have used today’s Go plan limit. Upgrade to Pro to continue learning today.";
-    }
-
-    return "You have used today’s Pro plan limit. Please continue again tomorrow.";
-  }
-
   function getArray(value, fallback = []) {
     return Array.isArray(value) && value.length > 0 ? value : fallback;
+  }
+
+  function applyBackendUsage(finalPack) {
+    const backendUsage = finalPack?.usage_status;
+
+    if (!backendUsage) return;
+
+    const backendUsedHours = Number(backendUsage.used_hours || 0);
+
+    if (!Number.isNaN(backendUsedHours)) {
+      setUsedHours(backendUsedHours);
+    }
   }
 
   function saveToRecents(currentVideoId, currentUrl, currentPack) {
@@ -271,27 +250,6 @@ function Dashboard() {
       return;
     }
 
-    const dailyLimit = getDailyLimitHours();
-    const currentUsed = getUsedHoursToday();
-    const remainingHours = dailyLimit - currentUsed;
-    const videoHours = getVideoHoursForDemo(cleanUrl);
-
-    setUsedHours(currentUsed);
-
-    if (remainingHours <= 0) {
-      setError(getLimitErrorMessage());
-      return;
-    }
-
-    if (videoHours > remainingHours) {
-      setError(
-        `You have only ${formatHours(
-          remainingHours
-        )} remaining today. Please upload a video within your remaining limit or upgrade your plan.`
-      );
-      return;
-    }
-
     setUrl(cleanUrl);
     setError("");
     setPackNotice("");
@@ -320,9 +278,17 @@ function Dashboard() {
       }
 
       setStudyPack(finalPack);
-      updateUsedHours(videoHours);
+      applyBackendUsage(finalPack);
       saveToRecents(id, cleanUrl, finalPack);
       setShowNotes(true);
+
+      if (finalPack?.charged_hours) {
+        setPackNotice(
+          `Generated successfully. Charged ${formatHours(
+            finalPack.charged_hours
+          )} from your daily limit.`
+        );
+      }
     } catch (apiError) {
       setError(apiError.message || "Unable to generate study pack right now.");
     } finally {
@@ -333,27 +299,6 @@ function Dashboard() {
   async function handleUploadGenerate() {
     if (!selectedVideoFile) {
       setError("Please select a video file first.");
-      return;
-    }
-
-    const dailyLimit = getDailyLimitHours();
-    const currentUsed = getUsedHoursToday();
-    const remainingHours = dailyLimit - currentUsed;
-    const videoHours = 1;
-
-    setUsedHours(currentUsed);
-
-    if (remainingHours <= 0) {
-      setError(getLimitErrorMessage());
-      return;
-    }
-
-    if (videoHours > remainingHours) {
-      setError(
-        `You have only ${formatHours(
-          remainingHours
-        )} remaining today. Please upload a shorter video or upgrade your plan.`
-      );
       return;
     }
 
@@ -384,10 +329,19 @@ function Dashboard() {
       const uploadLabel = selectedVideoFile.name || "Uploaded Video";
 
       setStudyPack(finalPack);
-      updateUsedHours(videoHours);
+      applyBackendUsage(finalPack);
       saveToRecents(uploadId, uploadLabel, finalPack);
       setShowNotes(true);
-      setPackNotice("Generated using uploaded video audio + visual analysis.");
+
+      if (finalPack?.charged_hours) {
+        setPackNotice(
+          `Generated using uploaded video audio + visual analysis. Charged ${formatHours(
+            finalPack.charged_hours
+          )} from your daily limit.`
+        );
+      } else {
+        setPackNotice("Generated using uploaded video audio + visual analysis.");
+      }
     } catch (apiError) {
       setError(apiError.message || "Unable to analyze uploaded video right now.");
     } finally {
