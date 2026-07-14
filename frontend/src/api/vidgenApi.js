@@ -97,6 +97,47 @@ async function requestJson(endpoint, options = {}, timeoutMs = 180000) {
   }
 }
 
+async function requestFormData(endpoint, formData, timeoutMs = 300000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+      method: "POST",
+      body: formData,
+      signal: controller.signal,
+    });
+
+    let data = null;
+
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+
+    if (!response.ok) {
+      const backendMessage =
+        data?.detail ||
+        data?.message ||
+        `Request failed with status ${response.status}`;
+
+      throw new Error(backendMessage);
+    }
+
+    return data;
+  } catch (error) {
+    const friendlyMessage = getFriendlyError(
+      error,
+      "Something went wrong while uploading video to VidGen AI backend."
+    );
+
+    throw new Error(friendlyMessage, { cause: error });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export async function generateStudyPack(payload) {
   try {
     const videoUrl = getVideoUrl(payload);
@@ -132,6 +173,48 @@ export async function generateStudyPack(payload) {
     const friendlyMessage = getFriendlyError(
       error,
       "Video AI generation failed. Try a public YouTube lecture video."
+    );
+
+    throw new Error(friendlyMessage, { cause: error });
+  }
+}
+
+export async function generateStudyPackFromUpload(file, options = {}) {
+  try {
+    if (!file) {
+      throw new Error("Please select a video file first.");
+    }
+
+    const maxSize = 200 * 1024 * 1024;
+
+    if (file.size > maxSize) {
+      throw new Error("Video file is too large. Upload a short video under 200MB.");
+    }
+
+    const formData = new FormData();
+
+    formData.append("video_file", file);
+    formData.append("topic", options.topic || "Uploaded Lecture");
+    formData.append("account_type", options.account_type || options.accountType || "student");
+    formData.append("plan", options.plan || "free");
+
+    const data = await requestFormData(
+      "/api/generate-study-pack-upload",
+      formData,
+      360000
+    );
+
+    const finalPack = data?.study_pack || data;
+
+    if (!data?.success || !finalPack) {
+      throw new Error("Uploaded video AI could not generate the study pack.");
+    }
+
+    return finalPack;
+  } catch (error) {
+    const friendlyMessage = getFriendlyError(
+      error,
+      "Uploaded video analysis failed. Try a shorter MP4 lecture video."
     );
 
     throw new Error(friendlyMessage, { cause: error });

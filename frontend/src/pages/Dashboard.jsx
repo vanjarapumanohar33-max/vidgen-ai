@@ -23,7 +23,11 @@ import DashboardNavbar from "../components/DashboardNavbar";
 import DashboardSidebar from "../components/DashboardSidebar";
 import DashboardPanel from "../components/DashboardPanel";
 import AITutorPanel from "../components/AITutorPanel";
-import { exportStudyPackPDF, generateStudyPack } from "../api/vidgenApi";
+import {
+  exportStudyPackPDF,
+  generateStudyPack,
+  generateStudyPackFromUpload,
+} from "../api/vidgenApi";
 
 import "./Dashboard.css";
 
@@ -34,6 +38,9 @@ function Dashboard() {
   const plan = localStorage.getItem("vidgen_plan") || "Free";
 
   const [url, setUrl] = useState("");
+  const [selectedVideoFile, setSelectedVideoFile] = useState(null);
+  const [inputMode, setInputMode] = useState("youtube");
+
   const [videoId, setVideoId] = useState("");
   const [loading, setLoading] = useState(false);
   const [showNotes, setShowNotes] = useState(false);
@@ -235,17 +242,23 @@ function Dashboard() {
     );
 
     const newRecent = {
+      id: currentPack?.id || `${currentVideoId}-${Date.now()}`,
       title: currentPack?.title || "Verified Study Pack",
       date: new Date().toLocaleString(),
       url: currentUrl,
       videoId: currentVideoId,
       plan,
       accountType,
+      studyPack: currentPack,
     };
+
+    const filteredRecents = oldRecents.filter(
+      (item) => item.videoId !== currentVideoId
+    );
 
     localStorage.setItem(
       "vidgen_recents",
-      JSON.stringify([newRecent, ...oldRecents].slice(0, 20))
+      JSON.stringify([newRecent, ...filteredRecents].slice(0, 20))
     );
   }
 
@@ -317,8 +330,75 @@ function Dashboard() {
     }
   }
 
+  async function handleUploadGenerate() {
+    if (!selectedVideoFile) {
+      setError("Please select a video file first.");
+      return;
+    }
+
+    const dailyLimit = getDailyLimitHours();
+    const currentUsed = getUsedHoursToday();
+    const remainingHours = dailyLimit - currentUsed;
+    const videoHours = 1;
+
+    setUsedHours(currentUsed);
+
+    if (remainingHours <= 0) {
+      setError(getLimitErrorMessage());
+      return;
+    }
+
+    if (videoHours > remainingHours) {
+      setError(
+        `You have only ${formatHours(
+          remainingHours
+        )} remaining today. Please upload a shorter video or upgrade your plan.`
+      );
+      return;
+    }
+
+    setError("");
+    setPackNotice("");
+    setVideoId("");
+    setLoading(true);
+    setShowNotes(false);
+    setPanelOpen(false);
+    setActivePackTab("notes");
+    setStudyPack(null);
+
+    try {
+      const result = await generateStudyPackFromUpload(selectedVideoFile, {
+        topic: selectedVideoFile.name || "Uploaded Lecture",
+        account_type: accountType,
+        accountType,
+        plan,
+      });
+
+      const finalPack = result?.study_pack || result;
+
+      if (!finalPack) {
+        throw new Error("Uploaded video study pack could not be generated.");
+      }
+
+      const uploadId = `upload-${Date.now()}`;
+      const uploadLabel = selectedVideoFile.name || "Uploaded Video";
+
+      setStudyPack(finalPack);
+      updateUsedHours(videoHours);
+      saveToRecents(uploadId, uploadLabel, finalPack);
+      setShowNotes(true);
+      setPackNotice("Generated using uploaded video audio + visual analysis.");
+    } catch (apiError) {
+      setError(apiError.message || "Unable to analyze uploaded video right now.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function handleNewChat() {
     setUrl("");
+    setSelectedVideoFile(null);
+    setInputMode("youtube");
     setVideoId("");
     setLoading(false);
     setShowNotes(false);
@@ -337,14 +417,24 @@ function Dashboard() {
 
   function handleOpenSavedItem(item) {
     setUrl(item.url || "");
-    setVideoId(item.videoId || "");
-    setShowNotes(false);
+    setVideoId(item.videoId?.startsWith("upload-") ? "" : item.videoId || "");
+    setSelectedVideoFile(null);
+    setInputMode(item.videoId?.startsWith("upload-") ? "upload" : "youtube");
     setLoading(false);
-    setStudyPack(null);
     setError("");
-    setPackNotice("Paste/generate again to reload the full study pack.");
     setPanelOpen(false);
     setActivePackTab("notes");
+
+    if (item.studyPack) {
+      setStudyPack(item.studyPack);
+      setShowNotes(true);
+      setPackNotice("Loaded from your recent study packs.");
+      return;
+    }
+
+    setStudyPack(null);
+    setShowNotes(false);
+    setPackNotice("This older recent item has no saved study pack. Generate again to reload it.");
   }
 
   function handleLockedFeature(message) {
@@ -472,7 +562,9 @@ function Dashboard() {
                   "Step-by-step explanation",
                   "Formula or diagram areas if detected",
                   "Quick revision points",
-                ].map((item, index) => <li key={`fallback-core-${index}`}>{item}</li>)}
+                ].map((item, index) => (
+                  <li key={`fallback-core-${index}`}>{item}</li>
+                ))}
           </ul>
         </article>
       </div>
@@ -953,31 +1045,125 @@ function Dashboard() {
 
           <p>
             {accountType === "learner"
-              ? "Paste a learning video and generate a clean, trusted study pack."
-              : "Paste a YouTube lecture and generate a verified exam-ready study pack."}
+              ? "Paste a learning video or upload a video file and generate a clean, trusted study pack."
+              : "Paste a YouTube lecture or upload a video file and generate a verified exam-ready study pack."}
           </p>
 
           <div className="url-box">
-            <input
-              type="text"
-              placeholder="Paste YouTube URL..."
-              value={url}
-              onChange={(e) => {
-                setUrl(e.target.value);
+            {inputMode === "youtube" ? (
+              <input
+                type="text"
+                placeholder="Paste YouTube URL..."
+                value={url}
+                onChange={(e) => {
+                  setUrl(e.target.value);
+                  setError("");
+                  setPackNotice("");
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    handleGenerate();
+                  }
+                }}
+              />
+            ) : (
+              <input
+                type="file"
+                accept="video/mp4,video/webm,video/quicktime,video/x-msvideo,video/*"
+                onChange={(e) => {
+                  setSelectedVideoFile(e.target.files?.[0] || null);
+                  setError("");
+                  setPackNotice("");
+                }}
+              />
+            )}
+
+            <button
+              onClick={
+                inputMode === "youtube" ? handleGenerate : handleUploadGenerate
+              }
+              disabled={loading}
+            >
+              {loading
+                ? "Generating..."
+                : inputMode === "youtube"
+                ? "Generate"
+                : "Upload & Analyze"}
+            </button>
+          </div>
+
+          <div
+            style={{
+              display: "flex",
+              gap: "10px",
+              marginTop: "14px",
+              justifyContent: "center",
+              flexWrap: "wrap",
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => {
+                setInputMode("youtube");
                 setError("");
                 setPackNotice("");
               }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  handleGenerate();
-                }
+              style={{
+                border:
+                  inputMode === "youtube"
+                    ? "1px solid #ff2b2b"
+                    : "1px solid rgba(255,255,255,0.2)",
+                background:
+                  inputMode === "youtube"
+                    ? "rgba(255,43,43,0.15)"
+                    : "rgba(255,255,255,0.06)",
+                color: "#fff",
+                padding: "10px 14px",
+                borderRadius: "999px",
+                cursor: "pointer",
               }}
-            />
+            >
+              YouTube URL
+            </button>
 
-            <button onClick={handleGenerate} disabled={loading}>
-              {loading ? "Generating..." : "Generate"}
+            <button
+              type="button"
+              onClick={() => {
+                setInputMode("upload");
+                setError("");
+                setPackNotice("");
+              }}
+              style={{
+                border:
+                  inputMode === "upload"
+                    ? "1px solid #ff2b2b"
+                    : "1px solid rgba(255,255,255,0.2)",
+                background:
+                  inputMode === "upload"
+                    ? "rgba(255,43,43,0.15)"
+                    : "rgba(255,255,255,0.06)",
+                color: "#fff",
+                padding: "10px 14px",
+                borderRadius: "999px",
+                cursor: "pointer",
+              }}
+            >
+              Upload Video
             </button>
           </div>
+
+          {selectedVideoFile && inputMode === "upload" && (
+            <p
+              style={{
+                marginTop: "12px",
+                color: "rgba(255,255,255,0.72)",
+                fontSize: "13px",
+                textAlign: "center",
+              }}
+            >
+              Selected file: {selectedVideoFile.name}
+            </p>
+          )}
 
           {error && <span className="error-text">{error}</span>}
         </section>
@@ -995,7 +1181,11 @@ function Dashboard() {
         {loading && (
           <section className="loading-line">
             <span className="tiny-loader"></span>
-            <p>Building your verified AI study pack...</p>
+            <p>
+              {inputMode === "upload"
+                ? "Uploading and analyzing video audio + visual frames..."
+                : "Building your verified AI study pack..."}
+            </p>
           </section>
         )}
 
