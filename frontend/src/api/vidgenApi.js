@@ -1,6 +1,19 @@
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 
+function getOrCreateClientId() {
+  let clientId = localStorage.getItem("vidgen_client_id");
+
+  if (!clientId) {
+    clientId = `vidgen_${Date.now()}_${Math.random()
+      .toString(36)
+      .slice(2, 12)}`;
+    localStorage.setItem("vidgen_client_id", clientId);
+  }
+
+  return clientId;
+}
+
 function getFriendlyError(error, fallbackMessage) {
   if (error?.name === "AbortError") {
     return "Video AI is taking longer than expected. On free hosting, the backend may be waking up. Please try again in 30 seconds.";
@@ -138,10 +151,73 @@ async function requestFormData(endpoint, formData, timeoutMs = 300000) {
   }
 }
 
+function getUploadedVideoDurationHours(file) {
+  return new Promise((resolve) => {
+    try {
+      const video = document.createElement("video");
+      const objectUrl = URL.createObjectURL(file);
+
+      video.preload = "metadata";
+
+      video.onloadedmetadata = () => {
+        URL.revokeObjectURL(objectUrl);
+
+        const seconds = Number(video.duration || 0);
+
+        if (!seconds || Number.isNaN(seconds)) {
+          resolve(1);
+          return;
+        }
+
+        resolve(Math.max(seconds / 3600, 1 / 60));
+      };
+
+      video.onerror = () => {
+        URL.revokeObjectURL(objectUrl);
+        resolve(1);
+      };
+
+      video.src = objectUrl;
+    } catch {
+      resolve(1);
+    }
+  });
+}
+
+function syncUsageToLocalStorage(usageStatus) {
+  if (!usageStatus) return;
+
+  const usedHours = Number(usageStatus.used_hours || 0);
+
+  if (!Number.isNaN(usedHours)) {
+    localStorage.setItem("vidgen_used_hours", String(usedHours));
+    localStorage.setItem("vidgen_usage_date", usageStatus.date || "");
+  }
+}
+
+export async function getUsageStatus(plan = "Free") {
+  const clientId = getOrCreateClientId();
+
+  const data = await requestJson(
+    `/api/usage-status?client_id=${encodeURIComponent(
+      clientId
+    )}&plan=${encodeURIComponent(plan)}`,
+    {
+      method: "GET",
+    },
+    30000
+  );
+
+  syncUsageToLocalStorage(data?.usage_status);
+
+  return data?.usage_status;
+}
+
 export async function generateStudyPack(payload) {
   try {
     const videoUrl = getVideoUrl(payload);
     const topic = getTopic(payload);
+    const clientId = getOrCreateClientId();
 
     if (!videoUrl) {
       throw new Error("Please paste a valid YouTube URL.");
@@ -157,6 +233,7 @@ export async function generateStudyPack(payload) {
           account_type:
             payload?.account_type || payload?.accountType || "student",
           plan: payload?.plan || "free",
+          client_id: clientId,
         }),
       },
       240000
@@ -167,6 +244,11 @@ export async function generateStudyPack(payload) {
     if (!data?.success || !finalPack) {
       throw new Error("Video AI could not generate the study pack. Please try again.");
     }
+
+    finalPack.usage_status = data?.usage_status || null;
+    finalPack.charged_hours = data?.charged_hours || null;
+
+    syncUsageToLocalStorage(data?.usage_status);
 
     return finalPack;
   } catch (error) {
@@ -191,12 +273,17 @@ export async function generateStudyPackFromUpload(file, options = {}) {
       throw new Error("Video file is too large. Upload a short video under 200MB.");
     }
 
+    const clientId = getOrCreateClientId();
+    const durationHours = await getUploadedVideoDurationHours(file);
+
     const formData = new FormData();
 
     formData.append("video_file", file);
     formData.append("topic", options.topic || "Uploaded Lecture");
     formData.append("account_type", options.account_type || options.accountType || "student");
     formData.append("plan", options.plan || "free");
+    formData.append("client_id", clientId);
+    formData.append("video_duration_hours", String(durationHours));
 
     const data = await requestFormData(
       "/api/generate-study-pack-upload",
@@ -209,6 +296,11 @@ export async function generateStudyPackFromUpload(file, options = {}) {
     if (!data?.success || !finalPack) {
       throw new Error("Uploaded video AI could not generate the study pack.");
     }
+
+    finalPack.usage_status = data?.usage_status || null;
+    finalPack.charged_hours = data?.charged_hours || null;
+
+    syncUsageToLocalStorage(data?.usage_status);
 
     return finalPack;
   } catch (error) {
