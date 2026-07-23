@@ -6,6 +6,7 @@ from typing import Optional, List
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 from dotenv import load_dotenv
+from pathlib import Path
 import os
 import re
 import uuid
@@ -16,7 +17,8 @@ import mimetypes
 import threading
 import urllib.request
 import urllib.parse
-from pathlib import Path
+import hmac
+import hashlib
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
@@ -24,6 +26,9 @@ load_dotenv(BASE_DIR / ".env")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
+
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
 
 try:
     from reportlab.lib.pagesizes import A4
@@ -42,11 +47,16 @@ try:
 except Exception:
     types = None
 
+try:
+    import razorpay
+except Exception:
+    razorpay = None
+
 
 app = FastAPI(
     title="VidGen AI Backend",
     description="Multimodal AI backend for VidGen AI video study pack generation.",
-    version="3.1.0",
+    version="3.2.0",
 )
 
 app.add_middleware(
@@ -85,8 +95,24 @@ class ExportPDFRequest(BaseModel):
     questions: List[str]
 
 
-USAGE_STORE_FILE = "usage_store.json"
+class CreatePaymentOrderRequest(BaseModel):
+    plan: str
+    client_id: Optional[str] = "anonymous"
+
+
+class VerifyPaymentRequest(BaseModel):
+    plan: str
+    client_id: Optional[str] = "anonymous"
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+
+
+USAGE_STORE_FILE = str(BASE_DIR / "usage_store.json")
+PAYMENT_STORE_FILE = str(BASE_DIR / "payment_store.json")
+
 usage_lock = threading.Lock()
+payment_lock = threading.Lock()
 
 SUPPORTED_VIDEO_MIME_TYPES = {
     "video/mp4",
@@ -103,6 +129,19 @@ SUPPORTED_VIDEO_MIME_TYPES = {
 }
 
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
+
+PLAN_PAYMENT_DETAILS = {
+    "Go": {
+        "amount": 100,
+        "display_amount": "₹1",
+        "hours": 10,
+    },
+    "Pro": {
+        "amount": 200,
+        "display_amount": "₹2",
+        "hours": 16,
+    },
+}
 
 
 def clean_video_id(video_id: str) -> Optional[str]:
@@ -323,6 +362,158 @@ def record_usage_hours(client_id: str, plan: str, charged_hours: float, source: 
     return get_usage_status_data(safe_id, clean_plan)
 
 
+def load_payment_store():
+    if not os.path.exists(PAYMENT_STORE_FILE):
+        return {
+            "orders": {},
+            "plans": {},
+        }
+
+    try:
+        with open(PAYMENT_STORE_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+
+        data.setdefault("orders", {})
+        data.setdefault("plans", {})
+
+        return data
+    except Exception:
+        return {
+            "orders": {},
+            "plans": {},
+        }
+
+
+def save_payment_store(data):
+    with open(PAYMENT_STORE_FILE, "w", encoding="utf-8") as file:
+        json.dump(data, file, indent=2)
+
+
+def get_razorpay_client():
+    if razorpay is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Razorpay package is not installed. Run: python -m pip install razorpay",
+        )
+
+    if not RAZORPAY_KEY_ID or not RAZORPAY_KEY_SECRET:
+        raise HTTPException(
+            status_code=500,
+            detail="Razorpay keys are missing on backend.",
+        )
+
+    return razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
+
+
+def get_saved_plan_for_client(client_id: str) -> str:
+    safe_id = safe_client_id(client_id)
+
+    with payment_lock:
+        store = load_payment_store()
+        plan_data = store.get("plans", {}).get(safe_id, {})
+
+    saved_plan = normalize_plan(plan_data.get("plan", "Free"))
+
+    if saved_plan in ["Go", "Pro"]:
+        return saved_plan
+
+    return "Free"
+
+
+def resolve_effective_plan(client_id: str, requested_plan: str = "Free") -> str:
+    saved_plan = get_saved_plan_for_client(client_id)
+
+    if saved_plan in ["Go", "Pro"]:
+        return saved_plan
+
+    return "Free"
+
+
+def verify_razorpay_signature(order_id: str, payment_id: str, signature: str):
+    client = get_razorpay_client()
+
+    payload = {
+        "razorpay_order_id": order_id,
+        "razorpay_payment_id": payment_id,
+        "razorpay_signature": signature,
+    }
+
+    try:
+        client.utility.verify_payment_signature(payload)
+        return True
+    except Exception:
+        pass
+
+    expected_signature = hmac.new(
+        RAZORPAY_KEY_SECRET.encode("utf-8"),
+        f"{order_id}|{payment_id}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+    return hmac.compare_digest(expected_signature, signature)
+
+
+def save_created_payment_order(order_id: str, client_id: str, plan: str, amount: int):
+    safe_id = safe_client_id(client_id)
+
+    with payment_lock:
+        store = load_payment_store()
+
+        store.setdefault("orders", {})
+        store["orders"][order_id] = {
+            "client_id": safe_id,
+            "plan": plan,
+            "amount": amount,
+            "status": "created",
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+        save_payment_store(store)
+
+
+def mark_payment_success(order_id: str, payment_id: str, client_id: str, plan: str):
+    safe_id = safe_client_id(client_id)
+
+    with payment_lock:
+        store = load_payment_store()
+        order_data = store.get("orders", {}).get(order_id)
+
+        if not order_data:
+            raise HTTPException(
+                status_code=404,
+                detail="Payment order not found on backend.",
+            )
+
+        if order_data.get("client_id") != safe_id:
+            raise HTTPException(
+                status_code=403,
+                detail="Payment order does not belong to this user.",
+            )
+
+        if order_data.get("plan") != plan:
+            raise HTTPException(
+                status_code=400,
+                detail="Payment plan mismatch.",
+            )
+
+        order_data["status"] = "paid"
+        order_data["payment_id"] = payment_id
+        order_data["paid_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        store.setdefault("plans", {})
+        store["plans"][safe_id] = {
+            "plan": plan,
+            "payment_id": payment_id,
+            "order_id": order_id,
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+        store["orders"][order_id] = order_data
+        save_payment_store(store)
+
+    return get_saved_plan_for_client(safe_id)
+
+
 def parse_youtube_iso8601_duration(duration: str) -> int:
     if not duration:
         return 0
@@ -484,7 +675,6 @@ def call_gemini_video(youtube_url: str, prompt: str) -> tuple[Optional[str], Opt
                     return output_text, None
 
             last_error = "Gemini returned an empty video analysis response."
-
         except Exception as error:
             last_error = str(error)
 
@@ -508,7 +698,6 @@ def call_gemini_video(youtube_url: str, prompt: str) -> tuple[Optional[str], Opt
                 return output_text, None
 
             last_error = "Gemini returned an empty video analysis response."
-
         except Exception as error:
             last_error = str(error)
 
@@ -534,7 +723,6 @@ def call_gemini_video(youtube_url: str, prompt: str) -> tuple[Optional[str], Opt
                     return output_text.strip(), None
 
             last_error = "Gemini returned an empty video analysis response."
-
         except Exception as error:
             last_error = str(error)
 
@@ -904,8 +1092,6 @@ def call_gemini_uploaded_video(file_path: str, mime_type: str, prompt: str) -> t
     if client is None:
         return None, "Gemini client is not available. Check GEMINI_API_KEY and google-genai installation."
 
-    uploaded_file = None
-
     try:
         uploaded_file = client.files.upload(file=file_path)
 
@@ -1019,15 +1205,20 @@ def root():
     return {
         "message": "VidGen AI Backend is running successfully.",
         "status": "ok",
-        "version": "3.1.0",
+        "version": "3.2.0",
         "ai_enabled": bool(GEMINI_API_KEY and genai is not None),
         "youtube_api_enabled": bool(YOUTUBE_API_KEY),
+        "razorpay_enabled": bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET and razorpay is not None),
         "model": GEMINI_MODEL,
         "multimodal_video_ai": True,
         "usage_limits": {
             "Free": "4 hrs/day",
             "Go": "10 hrs/day",
             "Pro": "16 hrs/day",
+        },
+        "payment_test_prices": {
+            "Go": "₹1",
+            "Pro": "₹2",
         },
         "docs": "Open /docs to test APIs.",
     }
@@ -1038,9 +1229,10 @@ def health_check():
     return {
         "status": "healthy",
         "service": "VidGen AI Backend",
-        "version": "3.1.0",
+        "version": "3.2.0",
         "ai_enabled": bool(GEMINI_API_KEY and genai is not None),
         "youtube_api_enabled": bool(YOUTUBE_API_KEY),
+        "razorpay_enabled": bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET and razorpay is not None),
         "model": GEMINI_MODEL,
         "multimodal_video_ai": True,
         "usage_limits": {
@@ -1048,14 +1240,123 @@ def health_check():
             "Go": "10 hrs/day",
             "Pro": "16 hrs/day",
         },
+        "payment_test_prices": {
+            "Go": "₹1",
+            "Pro": "₹2",
+        },
+    }
+
+
+@app.get("/api/user-plan")
+def user_plan(client_id: str = "anonymous"):
+    plan = get_saved_plan_for_client(client_id)
+
+    return {
+        "success": True,
+        "client_id": safe_client_id(client_id),
+        "plan": plan,
+        "limit_hours": get_plan_limit_hours(plan),
     }
 
 
 @app.get("/api/usage-status")
 def usage_status(client_id: str = "anonymous", plan: str = "Free"):
+    effective_plan = resolve_effective_plan(client_id, plan)
+
     return {
         "success": True,
-        "usage_status": get_usage_status_data(client_id, plan),
+        "usage_status": get_usage_status_data(client_id, effective_plan),
+    }
+
+
+@app.post("/api/payment/create-order")
+def create_payment_order(request: CreatePaymentOrderRequest):
+    plan = normalize_plan(request.plan)
+
+    if plan not in ["Go", "Pro"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Only Go and Pro plans require payment.",
+        )
+
+    payment_details = PLAN_PAYMENT_DETAILS[plan]
+    amount = payment_details["amount"]
+
+    client = get_razorpay_client()
+    receipt_id = f"vidgen_{uuid.uuid4().hex[:24]}"
+
+    try:
+        order = client.order.create(
+            {
+                "amount": amount,
+                "currency": "INR",
+                "receipt": receipt_id,
+                "notes": {
+                    "product": "VidGen AI",
+                    "plan": plan,
+                    "client_id": safe_client_id(request.client_id or "anonymous"),
+                },
+            }
+        )
+    except Exception as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not create Razorpay order. Reason: {str(error)}",
+        )
+
+    save_created_payment_order(
+        order_id=order["id"],
+        client_id=request.client_id or "anonymous",
+        plan=plan,
+        amount=amount,
+    )
+
+    return {
+        "success": True,
+        "key_id": RAZORPAY_KEY_ID,
+        "order_id": order["id"],
+        "amount": amount,
+        "currency": "INR",
+        "plan": plan,
+        "display_amount": payment_details["display_amount"],
+        "hours": payment_details["hours"],
+    }
+
+
+@app.post("/api/payment/verify")
+def verify_payment(request: VerifyPaymentRequest):
+    plan = normalize_plan(request.plan)
+
+    if plan not in ["Go", "Pro"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid paid plan.",
+        )
+
+    is_valid_signature = verify_razorpay_signature(
+        order_id=request.razorpay_order_id,
+        payment_id=request.razorpay_payment_id,
+        signature=request.razorpay_signature,
+    )
+
+    if not is_valid_signature:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid Razorpay payment signature.",
+        )
+
+    updated_plan = mark_payment_success(
+        order_id=request.razorpay_order_id,
+        payment_id=request.razorpay_payment_id,
+        client_id=request.client_id or "anonymous",
+        plan=plan,
+    )
+
+    return {
+        "success": True,
+        "message": f"{updated_plan} plan activated successfully.",
+        "plan": updated_plan,
+        "limit_hours": get_plan_limit_hours(updated_plan),
     }
 
 
@@ -1098,13 +1399,18 @@ def generate_study_pack(request: GenerateStudyPackRequest):
             detail="YouTube video URL is required.",
         )
 
+    effective_plan = resolve_effective_plan(
+        request.client_id or "anonymous",
+        request.plan or "Free",
+    )
+
     duration_hours, youtube_metadata_data = fetch_youtube_duration_hours(
         request.video_url
     )
 
     check_usage_limit_or_raise(
         client_id=request.client_id or "anonymous",
-        plan=request.plan or "Free",
+        plan=effective_plan,
         requested_hours=duration_hours,
     )
 
@@ -1115,7 +1421,7 @@ def generate_study_pack(request: GenerateStudyPackRequest):
 
     usage_status_data = record_usage_hours(
         client_id=request.client_id or "anonymous",
-        plan=request.plan or "Free",
+        plan=effective_plan,
         charged_hours=duration_hours,
         source="youtube",
     )
@@ -1145,9 +1451,14 @@ async def generate_study_pack_upload(
     temp_path = None
     charged_hours = max(float(video_duration_hours or 1.0), 1 / 60)
 
+    effective_plan = resolve_effective_plan(
+        client_id or "anonymous",
+        plan or "Free",
+    )
+
     check_usage_limit_or_raise(
         client_id=client_id or "anonymous",
-        plan=plan or "Free",
+        plan=effective_plan,
         requested_hours=charged_hours,
     )
 
@@ -1162,7 +1473,7 @@ async def generate_study_pack_upload(
 
         usage_status_data = record_usage_hours(
             client_id=client_id or "anonymous",
-            plan=plan or "Free",
+            plan=effective_plan,
             charged_hours=charged_hours,
             source="upload",
         )
@@ -1217,13 +1528,13 @@ def create_pdf_file(request: ExportPDFRequest):
             detail="PDF package is not installed properly. Run python -m pip install reportlab.",
         )
 
-    export_dir = "exports"
-    os.makedirs(export_dir, exist_ok=True)
+    export_dir = BASE_DIR / "exports"
+    export_dir.mkdir(exist_ok=True)
 
     file_name = f"vidgen_study_pack_{uuid.uuid4().hex[:8]}.pdf"
-    file_path = os.path.join(export_dir, file_name)
+    file_path = export_dir / file_name
 
-    pdf = canvas.Canvas(file_path, pagesize=A4)
+    pdf = canvas.Canvas(str(file_path), pagesize=A4)
     width, height = A4
 
     x = inch * 0.7
@@ -1286,7 +1597,7 @@ def create_pdf_file(request: ExportPDFRequest):
 
     pdf.save()
 
-    return file_name, file_path
+    return file_name, str(file_path)
 
 
 @app.post("/api/export-pdf")
@@ -1316,13 +1627,16 @@ def download_pdf(file_name: str):
     if "/" in file_name or "\\" in file_name or ".." in file_name:
         raise HTTPException(status_code=400, detail="Invalid file name.")
 
-    file_path = os.path.join("exports", file_name)
+    file_path = BASE_DIR / "exports" / file_name
 
-    if not os.path.exists(file_path):
+    if not file_path.exists():
         raise HTTPException(status_code=404, detail="PDF file not found.")
 
     return FileResponse(
-        file_path,
+        str(file_path),
         media_type="application/pdf",
         filename=file_name,
     )
+from secure_routes import install_secure_routes
+
+install_secure_routes(app, globals())

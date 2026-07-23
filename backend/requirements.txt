@@ -6,3 +6,5 @@ youtube-transcript-api
 reportlab
 google-genai
 python-multipart
+razorpay
+httpx

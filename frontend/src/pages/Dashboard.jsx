@@ -28,6 +28,8 @@ import {
   generateStudyPack,
   generateStudyPackFromUpload,
   getUsageStatus,
+  getUserPlan,
+  upgradePlanWithRazorpay,
 } from "../api/vidgenApi";
 
 import "./Dashboard.css";
@@ -36,7 +38,9 @@ function Dashboard() {
   const accountType =
     localStorage.getItem("vidgen_account_type") || "student";
 
-  const plan = localStorage.getItem("vidgen_plan") || "Free";
+  const [plan, setPlan] = useState(
+    localStorage.getItem("vidgen_plan") || "Free"
+  );
 
   const [url, setUrl] = useState("");
   const [selectedVideoFile, setSelectedVideoFile] = useState(null);
@@ -54,37 +58,35 @@ function Dashboard() {
   const [studyPack, setStudyPack] = useState(null);
   const [isExportingPDF, setIsExportingPDF] = useState(false);
   const [usedHours, setUsedHours] = useState(0);
+  const [isUpgrading, setIsUpgrading] = useState(false);
 
   useEffect(() => {
-    async function loadBackendUsage() {
-      try {
-        const status = await getUsageStatus(plan);
-        const backendUsedHours = Number(status?.used_hours || 0);
+  async function loadPlanAndUsage() {
+    try {
+      const planData = await getUserPlan();
 
-        if (!Number.isNaN(backendUsedHours)) {
-          setUsedHours(backendUsedHours);
-        }
-      } catch {
-        setUsedHours(0);
+      const backendPlan =
+        planData?.plan || localStorage.getItem("vidgen_plan") || "Free";
+
+      setPlan(backendPlan);
+      localStorage.setItem("vidgen_plan", backendPlan);
+
+      const status = await getUsageStatus(backendPlan);
+      const backendUsedHours = Number(status?.used_hours || 0);
+
+      if (!Number.isNaN(backendUsedHours)) {
+        setUsedHours(backendUsedHours);
       }
+    } catch {
+      setUsedHours(0);
     }
+  }
 
-    loadBackendUsage();
-  }, [plan]);
-
+  loadPlanAndUsage();
+}, []);
   function getDailyLimitHours() {
-    if (accountType === "student") {
-      if (plan === "Go") return 10;
-      if (plan === "Pro") return 16;
-      return 4;
-    }
-
-    if (accountType === "learner") {
-      if (plan === "Go") return 10;
-      if (plan === "Pro") return 16;
-      return 4;
-    }
-
+    if (plan === "Go") return 10;
+    if (plan === "Pro") return 16;
     return 4;
   }
 
@@ -212,6 +214,52 @@ function Dashboard() {
 
     if (!Number.isNaN(backendUsedHours)) {
       setUsedHours(backendUsedHours);
+    }
+
+    if (backendUsage.plan) {
+      setPlan(backendUsage.plan);
+      localStorage.setItem("vidgen_plan", backendUsage.plan);
+    }
+  }
+
+  async function refreshBackendUsage(currentPlan = plan) {
+    try {
+      const status = await getUsageStatus(currentPlan);
+      const backendUsedHours = Number(status?.used_hours || 0);
+
+      if (!Number.isNaN(backendUsedHours)) {
+        setUsedHours(backendUsedHours);
+      }
+
+      if (status?.plan) {
+        setPlan(status.plan);
+        localStorage.setItem("vidgen_plan", status.plan);
+      }
+    } catch {
+      // Keep current display if backend usage fetch fails.
+    }
+  }
+
+  async function handleUpgradePlan(targetPlan) {
+    try {
+      setIsUpgrading(true);
+      setError("");
+      setPackNotice("");
+
+      const result = await upgradePlanWithRazorpay(targetPlan);
+
+      const upgradedPlan = result?.plan || targetPlan;
+
+      setPlan(upgradedPlan);
+      localStorage.setItem("vidgen_plan", upgradedPlan);
+
+      await refreshBackendUsage(upgradedPlan);
+
+      setPackNotice(`${upgradedPlan} plan activated successfully.`);
+    } catch (upgradeError) {
+      setPackNotice(upgradeError.message || "Payment failed or cancelled.");
+    } finally {
+      setIsUpgrading(false);
     }
   }
 
@@ -644,57 +692,6 @@ function Dashboard() {
             ))}
           </ul>
         </article>
-
-        <article className="pack-card">
-          <div className="card-top">
-            <div>
-              <span className="card-tag">Viva + Mistakes</span>
-              <h3>Oral exam and accuracy support</h3>
-            </div>
-          </div>
-
-          <ul className="question-list">
-            {cramSheet.length > 0
-              ? cramSheet.slice(0, 5).map((item, index) => (
-                  <li key={`cram-mini-${index}`}>{item}</li>
-                ))
-              : [
-                  "Why is this topic important?",
-                  "Give one practical example.",
-                  "Common mistakes will be highlighted here.",
-                ].map((item, index) => (
-                  <li key={`fallback-viva-${index}`}>{item}</li>
-                ))}
-          </ul>
-        </article>
-
-        <article className="pack-card premium-pack-card">
-          <div className="card-top">
-            <div>
-              <span className="card-tag">Cram Sheet</span>
-              <h3>Last-minute exam booster</h3>
-            </div>
-
-            <span className="source-chip">
-              {hasProAccess() ? "Unlocked" : "Pro"}
-            </span>
-          </div>
-
-          <ul className="clean-list">
-            {cramSheet.length > 0
-              ? cramSheet.slice(0, 6).map((item, index) => (
-                  <li key={`cram-${index}`}>{item}</li>
-                ))
-              : [
-                  "Definitions",
-                  "Important questions",
-                  "Formula areas",
-                  "Memory triggers",
-                ].map((item, index) => (
-                  <li key={`fallback-cram-${index}`}>{item}</li>
-                ))}
-          </ul>
-        </article>
       </div>
     );
   }
@@ -873,13 +870,7 @@ function Dashboard() {
             return;
           }
 
-          if (
-            title.toLowerCase().includes("pdf") ||
-            title === "Full Study Pack" ||
-            title === "Cram Sheet"
-          ) {
-            handleExportPDF();
-          }
+          handleExportPDF();
         }}
       >
         <span className="export-icon">
@@ -910,8 +901,8 @@ function Dashboard() {
           </div>
 
           <p>
-            Free users can copy basic notes. Go unlocks useful PDF exports. Pro
-            unlocks the full verified study pack for serious exam preparation.
+            Free users can copy basic notes. Go and Pro users can unlock better
+            limits and advanced usage flow.
           </p>
         </article>
 
@@ -993,6 +984,52 @@ function Dashboard() {
             </div>
 
             <strong>{formatHours(remainingHours)} remaining today</strong>
+          </div>
+
+          <div
+            style={{
+              display: "flex",
+              gap: "10px",
+              justifyContent: "center",
+              flexWrap: "wrap",
+              marginTop: "12px",
+            }}
+          >
+            {plan !== "Go" && plan !== "Pro" && (
+              <button
+                type="button"
+                disabled={isUpgrading}
+                onClick={() => handleUpgradePlan("Go")}
+                style={{
+                  border: "1px solid rgba(255,255,255,0.18)",
+                  background: "rgba(255,255,255,0.06)",
+                  color: "#fff",
+                  padding: "10px 14px",
+                  borderRadius: "999px",
+                  cursor: "pointer",
+                }}
+              >
+                {isUpgrading ? "Opening Payment..." : "Upgrade to Go ₹1"}
+              </button>
+            )}
+
+            {plan !== "Pro" && (
+              <button
+                type="button"
+                disabled={isUpgrading}
+                onClick={() => handleUpgradePlan("Pro")}
+                style={{
+                  border: "1px solid #e50914",
+                  background: "rgba(229,9,20,0.18)",
+                  color: "#fff",
+                  padding: "10px 14px",
+                  borderRadius: "999px",
+                  cursor: "pointer",
+                }}
+              >
+                {isUpgrading ? "Opening Payment..." : "Upgrade to Pro ₹2"}
+              </button>
+            )}
           </div>
 
           <h1>What would you like to learn today?</h1>
@@ -1120,6 +1157,13 @@ function Dashboard() {
           )}
 
           {error && <span className="error-text">{error}</span>}
+
+          {packNotice && (
+            <div className="pack-notice" style={{ marginTop: "14px" }}>
+              <Lock size={16} />
+              <span>{packNotice}</span>
+            </div>
+          )}
         </section>
 
         {videoId && (
@@ -1200,13 +1244,6 @@ function Dashboard() {
                 <span>{studyPack?.accuracy || "AI assisted"}</span>
               </div>
             </div>
-
-            {packNotice && (
-              <div className="pack-notice">
-                <Lock size={16} />
-                <span>{packNotice}</span>
-              </div>
-            )}
 
             <div className="study-tabs">
               {studyTabs.map((tab) => (
