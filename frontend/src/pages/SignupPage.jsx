@@ -14,26 +14,180 @@ import {
 
 import { supabase } from "../lib/supabaseClient";
 
+function saveUserDetails(user) {
+  const metadata = user?.user_metadata || {};
+
+  localStorage.setItem(
+    "vidgen_auth_user_id",
+    user?.id || ""
+  );
+
+  localStorage.setItem(
+    "vidgen_email",
+    user?.email || ""
+  );
+
+  localStorage.setItem(
+    "vidgen_full_name",
+    metadata.full_name ||
+      user?.email?.split("@")[0] ||
+      "VidGen User"
+  );
+
+  localStorage.setItem(
+    "vidgen_account_type",
+    metadata.account_type || "student"
+  );
+
+  localStorage.setItem(
+    "vidgen_college",
+    metadata.college || ""
+  );
+
+  localStorage.setItem(
+    "vidgen_branch",
+    metadata.branch || ""
+  );
+
+  localStorage.setItem(
+    "vidgen_semester",
+    metadata.semester || ""
+  );
+
+  localStorage.setItem(
+    "vidgen_goal",
+    metadata.goal || ""
+  );
+
+  localStorage.setItem(
+    "vidgen_is_logged_in",
+    "true"
+  );
+
+  localStorage.setItem(
+    "vidgen_logged_in",
+    "true"
+  );
+
+  localStorage.setItem(
+    "vidgen_plan",
+    "Free"
+  );
+
+  localStorage.removeItem(
+    "vidgen_demo_password"
+  );
+
+  localStorage.removeItem(
+    "vidgen_password"
+  );
+}
+
+function getFriendlySignupError(message) {
+  const cleanMessage = String(
+    message || ""
+  ).toLowerCase();
+
+  if (
+    cleanMessage.includes(
+      "user already registered"
+    ) ||
+    cleanMessage.includes(
+      "already registered"
+    )
+  ) {
+    return "An account already exists with this email. Please log in.";
+  }
+
+  if (
+    cleanMessage.includes("invalid email")
+  ) {
+    return "Please enter a valid email address.";
+  }
+
+  if (
+    cleanMessage.includes("password") &&
+    cleanMessage.includes("characters")
+  ) {
+    return "Please use a stronger password with at least 8 characters.";
+  }
+
+  if (
+    cleanMessage.includes("rate limit")
+  ) {
+    return "Too many signup attempts. Please wait a few minutes and try again.";
+  }
+
+  if (
+    cleanMessage.includes(
+      "failed to fetch"
+    ) ||
+    cleanMessage.includes("network")
+  ) {
+    return "Could not connect to Supabase. Check your internet connection and try again.";
+  }
+
+  return (
+    message ||
+    "Signup failed. Please try again."
+  );
+}
+
 function SignupPage() {
   const navigate = useNavigate();
 
-  const [accountType, setAccountType] = useState("student");
-  const [fullName, setFullName] = useState("");
-  const [email, setEmail] = useState("");
-  const [college, setCollege] = useState("");
-  const [branch, setBranch] = useState("");
-  const [semester, setSemester] = useState("");
-  const [goal, setGoal] = useState("");
-  const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [acceptTerms, setAcceptTerms] = useState(false);
+  const [accountType, setAccountType] =
+    useState("student");
 
-  const [showPassword, setShowPassword] = useState(false);
-  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [fullName, setFullName] =
+    useState("");
 
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [successMessage, setSuccessMessage] = useState("");
+  const [email, setEmail] =
+    useState("");
+
+  const [college, setCollege] =
+    useState("");
+
+  const [branch, setBranch] =
+    useState("");
+
+  const [semester, setSemester] =
+    useState("");
+
+  const [goal, setGoal] =
+    useState("");
+
+  const [password, setPassword] =
+    useState("");
+
+  const [
+    confirmPassword,
+    setConfirmPassword,
+  ] = useState("");
+
+  const [acceptTerms, setAcceptTerms] =
+    useState(false);
+
+  const [
+    showPassword,
+    setShowPassword,
+  ] = useState(false);
+
+  const [
+    showConfirmPassword,
+    setShowConfirmPassword,
+  ] = useState(false);
+
+  const [loading, setLoading] =
+    useState(false);
+
+  const [error, setError] =
+    useState("");
+
+  const [
+    successMessage,
+    setSuccessMessage,
+  ] = useState("");
 
   function validateForm() {
     if (!fullName.trim()) {
@@ -44,19 +198,31 @@ function SignupPage() {
       return "Please enter your email address.";
     }
 
-    if (!email.includes("@")) {
+    if (
+      !email.includes("@") ||
+      !email.includes(".")
+    ) {
       return "Please enter a valid email address.";
     }
 
-    if (accountType === "student" && !college.trim()) {
+    if (
+      accountType === "student" &&
+      !college.trim()
+    ) {
       return "Please enter your college name.";
     }
 
-    if (accountType === "student" && !branch.trim()) {
-      return "Please select or enter your branch.";
+    if (
+      accountType === "student" &&
+      !branch.trim()
+    ) {
+      return "Please enter your branch.";
     }
 
-    if (accountType === "student" && !semester.trim()) {
+    if (
+      accountType === "student" &&
+      !semester.trim()
+    ) {
       return "Please select your semester.";
     }
 
@@ -69,41 +235,17 @@ function SignupPage() {
     }
 
     if (!acceptTerms) {
-      return "Please accept the Terms and Privacy Policy.";
+      return "Please accept the Terms of Service and Privacy Policy.";
     }
 
     return "";
   }
 
-  function getFriendlyAuthError(message) {
-    const cleanMessage = String(message || "").toLowerCase();
-
-    if (cleanMessage.includes("already registered")) {
-      return "An account already exists with this email. Please log in.";
-    }
-
-    if (cleanMessage.includes("invalid email")) {
-      return "Please enter a valid email address.";
-    }
-
-    if (
-      cleanMessage.includes("password") &&
-      cleanMessage.includes("characters")
-    ) {
-      return "Please use a stronger password with at least 8 characters.";
-    }
-
-    if (cleanMessage.includes("rate limit")) {
-      return "Too many signup attempts. Please wait for a few minutes and try again.";
-    }
-
-    return message || "Signup failed. Please try again.";
-  }
-
   async function handleSignup(event) {
     event.preventDefault();
 
-    const validationError = validateForm();
+    const validationError =
+      validateForm();
 
     if (validationError) {
       setError(validationError);
@@ -116,22 +258,42 @@ function SignupPage() {
       setError("");
       setSuccessMessage("");
 
-      const cleanEmail = email.trim().toLowerCase();
+      const cleanEmail = email
+        .trim()
+        .toLowerCase();
 
-      const { data, error: signupError } = await supabase.auth.signUp({
+      const {
+        data,
+        error: signupError,
+      } = await supabase.auth.signUp({
         email: cleanEmail,
         password,
         options: {
-          emailRedirectTo: `${window.location.origin}/login?confirmed=true`,
+          emailRedirectTo:
+            `${window.location.origin}/login?confirmed=true`,
+
           data: {
-            full_name: fullName.trim(),
-            account_type: accountType,
+            full_name:
+              fullName.trim(),
+
+            account_type:
+              accountType,
+
             college:
-              accountType === "student" ? college.trim() : "",
+              accountType === "student"
+                ? college.trim()
+                : "",
+
             branch:
-              accountType === "student" ? branch.trim() : "",
+              accountType === "student"
+                ? branch.trim()
+                : "",
+
             semester:
-              accountType === "student" ? semester.trim() : "",
+              accountType === "student"
+                ? semester.trim()
+                : "",
+
             goal: goal.trim(),
             plan: "Free",
           },
@@ -143,26 +305,42 @@ function SignupPage() {
       }
 
       if (!data?.user) {
-        throw new Error("Supabase could not create the account.");
+        throw new Error(
+          "Supabase could not create the account."
+        );
       }
 
       /*
-       * We intentionally do not store the password or mark the user as
-       * logged in inside localStorage. Supabase manages authentication.
+       * Confirm Email OFF:
+       * Supabase returns an active session,
+       * so the user goes directly to Dashboard.
        */
+      if (data.session) {
+        saveUserDetails(data.user);
 
-      localStorage.removeItem("vidgen_demo_password");
-      localStorage.removeItem("vidgen_is_logged_in");
-      localStorage.removeItem("vidgen_logged_in");
+        navigate("/dashboard", {
+          replace: true,
+        });
 
+        return;
+      }
+
+      /*
+       * Confirm Email ON in the future:
+       * User is created but session is null.
+       */
       setSuccessMessage(
-        "Account created successfully. Open your email and click the confirmation link, then log in to VidGen AI."
+        "Account created successfully. Please open your email and confirm your VidGen AI account before logging in."
       );
 
       setPassword("");
       setConfirmPassword("");
     } catch (signupError) {
-      setError(getFriendlyAuthError(signupError?.message));
+      setError(
+        getFriendlySignupError(
+          signupError?.message
+        )
+      );
     } finally {
       setLoading(false);
     }
@@ -170,8 +348,13 @@ function SignupPage() {
 
   return (
     <main style={styles.page}>
-      <div style={styles.backgroundGlowOne}></div>
-      <div style={styles.backgroundGlowTwo}></div>
+      <div
+        style={styles.backgroundGlowOne}
+      />
+
+      <div
+        style={styles.backgroundGlowTwo}
+      />
 
       <button
         type="button"
@@ -184,32 +367,52 @@ function SignupPage() {
 
       <section style={styles.wrapper}>
         <div style={styles.brandSection}>
-          <span style={styles.brandBadge}>VIDGEN AI</span>
+          <span style={styles.brandBadge}>
+            VIDGEN AI
+          </span>
 
           <h1 style={styles.heroTitle}>
             Convert lectures into
-            <span style={styles.highlightText}> exam-ready knowledge.</span>
+            <span
+              style={styles.highlightText}
+            >
+              {" "}
+              exam-ready knowledge.
+            </span>
           </h1>
 
-          <p style={styles.heroDescription}>
-            Create your account and generate lecture notes, exam questions,
-            MCQs, flashcards, AI Tutor answers and revision PDFs.
+          <p
+            style={styles.heroDescription}
+          >
+            Create your account and
+            generate lecture notes, exam
+            questions, MCQs, flashcards,
+            AI Tutor answers and revision
+            PDFs.
           </p>
 
           <div style={styles.benefitList}>
             <div style={styles.benefitItem}>
               <CheckCircle2 size={18} />
-              <span>Multimodal lecture analysis</span>
+              <span>
+                Multimodal lecture analysis
+              </span>
             </div>
 
             <div style={styles.benefitItem}>
               <CheckCircle2 size={18} />
-              <span>Exact video-duration usage limits</span>
+              <span>
+                Exact video-duration usage
+                limits
+              </span>
             </div>
 
             <div style={styles.benefitItem}>
               <CheckCircle2 size={18} />
-              <span>Secure Supabase authentication</span>
+              <span>
+                Secure Supabase
+                authentication
+              </span>
             </div>
           </div>
         </div>
@@ -221,9 +424,15 @@ function SignupPage() {
             </div>
 
             <div>
-              <h2 style={styles.formTitle}>Create your account</h2>
-              <p style={styles.formSubtitle}>
-                Start with the Free plan and upgrade later.
+              <h2 style={styles.formTitle}>
+                Create your account
+              </h2>
+
+              <p
+                style={styles.formSubtitle}
+              >
+                Start with the Free plan
+                and upgrade later.
               </p>
             </div>
           </div>
@@ -231,14 +440,22 @@ function SignupPage() {
           {successMessage && (
             <div style={styles.successBox}>
               <CheckCircle2 size={20} />
+
               <div>
-                <strong>Email confirmation required</strong>
+                <strong>
+                  Account created
+                </strong>
+
                 <p>{successMessage}</p>
 
                 <button
                   type="button"
-                  onClick={() => navigate("/login")}
-                  style={styles.loginAfterSignupButton}
+                  onClick={() =>
+                    navigate("/login")
+                  }
+                  style={
+                    styles.loginAfterSignupButton
+                  }
                 >
                   Go to Login
                 </button>
@@ -246,10 +463,19 @@ function SignupPage() {
             </div>
           )}
 
-          {error && <div style={styles.errorBox}>{error}</div>}
+          {error && (
+            <div style={styles.errorBox}>
+              {error}
+            </div>
+          )}
 
-          <form onSubmit={handleSignup} style={styles.form}>
-            <div style={styles.accountSelector}>
+          <form
+            onSubmit={handleSignup}
+            style={styles.form}
+          >
+            <div
+              style={styles.accountSelector}
+            >
               <button
                 type="button"
                 onClick={() => {
@@ -258,7 +484,9 @@ function SignupPage() {
                 }}
                 style={{
                   ...styles.accountButton,
-                  ...(accountType === "student"
+
+                  ...(accountType ===
+                  "student"
                     ? styles.activeAccountButton
                     : {}),
                 }}
@@ -274,7 +502,9 @@ function SignupPage() {
                 }}
                 style={{
                   ...styles.accountButton,
-                  ...(accountType === "learner"
+
+                  ...(accountType ===
+                  "learner"
                     ? styles.activeAccountButton
                     : {}),
                 }}
@@ -285,14 +515,23 @@ function SignupPage() {
 
             <label style={styles.label}>
               Full name
-              <div style={styles.inputWrapper}>
-                <User size={18} style={styles.inputIcon} />
+
+              <div
+                style={styles.inputWrapper}
+              >
+                <User
+                  size={18}
+                  style={styles.inputIcon}
+                />
 
                 <input
                   type="text"
                   value={fullName}
                   onChange={(event) => {
-                    setFullName(event.target.value);
+                    setFullName(
+                      event.target.value
+                    );
+
                     setError("");
                   }}
                   placeholder="Enter your full name"
@@ -304,14 +543,23 @@ function SignupPage() {
 
             <label style={styles.label}>
               Email address
-              <div style={styles.inputWrapper}>
-                <Mail size={18} style={styles.inputIcon} />
+
+              <div
+                style={styles.inputWrapper}
+              >
+                <Mail
+                  size={18}
+                  style={styles.inputIcon}
+                />
 
                 <input
                   type="email"
                   value={email}
                   onChange={(event) => {
-                    setEmail(event.target.value);
+                    setEmail(
+                      event.target.value
+                    );
+
                     setError("");
                   }}
                   placeholder="Enter your email address"
@@ -323,54 +571,108 @@ function SignupPage() {
 
             {accountType === "student" && (
               <>
-                <label style={styles.label}>
+                <label
+                  style={styles.label}
+                >
                   College
+
                   <input
                     type="text"
                     value={college}
                     onChange={(event) => {
-                      setCollege(event.target.value);
+                      setCollege(
+                        event.target.value
+                      );
+
                       setError("");
                     }}
                     placeholder="Example: RCEE, Eluru"
-                    style={styles.standardInput}
+                    style={
+                      styles.standardInput
+                    }
                   />
                 </label>
 
-                <div style={styles.twoColumnGrid}>
-                  <label style={styles.label}>
+                <div
+                  style={
+                    styles.twoColumnGrid
+                  }
+                >
+                  <label
+                    style={styles.label}
+                  >
                     Branch
+
                     <input
                       type="text"
                       value={branch}
                       onChange={(event) => {
-                        setBranch(event.target.value);
+                        setBranch(
+                          event.target.value
+                        );
+
                         setError("");
                       }}
                       placeholder="Example: ECE"
-                      style={styles.standardInput}
+                      style={
+                        styles.standardInput
+                      }
                     />
                   </label>
 
-                  <label style={styles.label}>
+                  <label
+                    style={styles.label}
+                  >
                     Semester
+
                     <select
                       value={semester}
                       onChange={(event) => {
-                        setSemester(event.target.value);
+                        setSemester(
+                          event.target.value
+                        );
+
                         setError("");
                       }}
-                      style={styles.standardInput}
+                      style={
+                        styles.standardInput
+                      }
                     >
-                      <option value="">Select semester</option>
-                      <option value="1-1">1-1 Semester</option>
-                      <option value="1-2">1-2 Semester</option>
-                      <option value="2-1">2-1 Semester</option>
-                      <option value="2-2">2-2 Semester</option>
-                      <option value="3-1">3-1 Semester</option>
-                      <option value="3-2">3-2 Semester</option>
-                      <option value="4-1">4-1 Semester</option>
-                      <option value="4-2">4-2 Semester</option>
+                      <option value="">
+                        Select semester
+                      </option>
+
+                      <option value="1-1">
+                        1-1 Semester
+                      </option>
+
+                      <option value="1-2">
+                        1-2 Semester
+                      </option>
+
+                      <option value="2-1">
+                        2-1 Semester
+                      </option>
+
+                      <option value="2-2">
+                        2-2 Semester
+                      </option>
+
+                      <option value="3-1">
+                        3-1 Semester
+                      </option>
+
+                      <option value="3-2">
+                        3-2 Semester
+                      </option>
+
+                      <option value="4-1">
+                        4-1 Semester
+                      </option>
+
+                      <option value="4-2">
+                        4-2 Semester
+                      </option>
                     </select>
                   </label>
                 </div>
@@ -379,10 +681,13 @@ function SignupPage() {
 
             <label style={styles.label}>
               Main learning goal
+
               <input
                 type="text"
                 value={goal}
-                onChange={(event) => setGoal(event.target.value)}
+                onChange={(event) =>
+                  setGoal(event.target.value)
+                }
                 placeholder={
                   accountType === "student"
                     ? "Example: Semester exams, GATE, VLSI"
@@ -394,55 +699,99 @@ function SignupPage() {
 
             <label style={styles.label}>
               Password
-              <div style={styles.inputWrapper}>
-                <Lock size={18} style={styles.inputIcon} />
+
+              <div
+                style={styles.inputWrapper}
+              >
+                <Lock
+                  size={18}
+                  style={styles.inputIcon}
+                />
 
                 <input
-                  type={showPassword ? "text" : "password"}
+                  type={
+                    showPassword
+                      ? "text"
+                      : "password"
+                  }
                   value={password}
                   onChange={(event) => {
-                    setPassword(event.target.value);
+                    setPassword(
+                      event.target.value
+                    );
+
                     setError("");
                   }}
                   placeholder="Minimum 8 characters"
                   autoComplete="new-password"
-                  style={styles.passwordInput}
+                  style={
+                    styles.passwordInput
+                  }
                 />
 
                 <button
                   type="button"
-                  onClick={() => setShowPassword((value) => !value)}
+                  onClick={() =>
+                    setShowPassword(
+                      (currentValue) =>
+                        !currentValue
+                    )
+                  }
                   aria-label={
-                    showPassword ? "Hide password" : "Show password"
+                    showPassword
+                      ? "Hide password"
+                      : "Show password"
                   }
                   style={styles.eyeButton}
                 >
-                  {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                  {showPassword ? (
+                    <EyeOff size={18} />
+                  ) : (
+                    <Eye size={18} />
+                  )}
                 </button>
               </div>
             </label>
 
             <label style={styles.label}>
               Confirm password
-              <div style={styles.inputWrapper}>
-                <Lock size={18} style={styles.inputIcon} />
+
+              <div
+                style={styles.inputWrapper}
+              >
+                <Lock
+                  size={18}
+                  style={styles.inputIcon}
+                />
 
                 <input
-                  type={showConfirmPassword ? "text" : "password"}
+                  type={
+                    showConfirmPassword
+                      ? "text"
+                      : "password"
+                  }
                   value={confirmPassword}
                   onChange={(event) => {
-                    setConfirmPassword(event.target.value);
+                    setConfirmPassword(
+                      event.target.value
+                    );
+
                     setError("");
                   }}
                   placeholder="Enter password again"
                   autoComplete="new-password"
-                  style={styles.passwordInput}
+                  style={
+                    styles.passwordInput
+                  }
                 />
 
                 <button
                   type="button"
                   onClick={() =>
-                    setShowConfirmPassword((value) => !value)
+                    setShowConfirmPassword(
+                      (currentValue) =>
+                        !currentValue
+                    )
                   }
                   aria-label={
                     showConfirmPassword
@@ -465,13 +814,17 @@ function SignupPage() {
                 type="checkbox"
                 checked={acceptTerms}
                 onChange={(event) => {
-                  setAcceptTerms(event.target.checked);
+                  setAcceptTerms(
+                    event.target.checked
+                  );
+
                   setError("");
                 }}
               />
 
               <span>
-                I agree to the Terms of Service and Privacy Policy.
+                I agree to the Terms of
+                Service and Privacy Policy.
               </span>
             </label>
 
@@ -480,12 +833,19 @@ function SignupPage() {
               disabled={loading}
               style={{
                 ...styles.submitButton,
-                ...(loading ? styles.disabledButton : {}),
+
+                ...(loading
+                  ? styles.disabledButton
+                  : {}),
               }}
             >
               {loading ? (
                 <>
-                  <Loader2 size={18} style={styles.loaderIcon} />
+                  <Loader2
+                    size={18}
+                    style={styles.loaderIcon}
+                  />
+
                   Creating account...
                 </>
               ) : (
@@ -495,7 +855,11 @@ function SignupPage() {
 
             <p style={styles.loginText}>
               Already have an account?{" "}
-              <Link to="/login" style={styles.loginLink}>
+
+              <Link
+                to="/login"
+                style={styles.loginLink}
+              >
                 Log in
               </Link>
             </p>
@@ -524,7 +888,8 @@ const styles = {
     top: "-180px",
     right: "-130px",
     borderRadius: "50%",
-    background: "rgba(229,9,20,0.17)",
+    background:
+      "rgba(229,9,20,0.17)",
     filter: "blur(90px)",
     pointerEvents: "none",
   },
@@ -536,7 +901,8 @@ const styles = {
     bottom: "-190px",
     left: "-130px",
     borderRadius: "50%",
-    background: "rgba(140,0,9,0.14)",
+    background:
+      "rgba(140,0,9,0.14)",
     filter: "blur(90px)",
     pointerEvents: "none",
   },
@@ -547,9 +913,11 @@ const styles = {
     display: "inline-flex",
     alignItems: "center",
     gap: "8px",
-    border: "1px solid rgba(255,255,255,0.12)",
+    border:
+      "1px solid rgba(255,255,255,0.12)",
     borderRadius: "999px",
-    background: "rgba(255,255,255,0.06)",
+    background:
+      "rgba(255,255,255,0.06)",
     color: "#ffffff",
     padding: "10px 15px",
     cursor: "pointer",
@@ -561,7 +929,8 @@ const styles = {
     width: "min(1180px, 100%)",
     margin: "38px auto",
     display: "grid",
-    gridTemplateColumns: "minmax(280px, 0.9fr) minmax(360px, 1fr)",
+    gridTemplateColumns:
+      "minmax(280px, 0.9fr) minmax(360px, 1fr)",
     gap: "56px",
     alignItems: "center",
   },
@@ -573,8 +942,10 @@ const styles = {
   brandBadge: {
     display: "inline-flex",
     borderRadius: "999px",
-    border: "1px solid rgba(229,9,20,0.4)",
-    background: "rgba(229,9,20,0.14)",
+    border:
+      "1px solid rgba(229,9,20,0.4)",
+    background:
+      "rgba(229,9,20,0.14)",
     color: "#ff5058",
     padding: "9px 14px",
     fontSize: "13px",
@@ -585,7 +956,8 @@ const styles = {
   heroTitle: {
     margin: "24px 0 18px",
     maxWidth: "650px",
-    fontSize: "clamp(40px, 6vw, 72px)",
+    fontSize:
+      "clamp(40px, 6vw, 72px)",
     lineHeight: 1.02,
     letterSpacing: "-0.04em",
   },
@@ -596,7 +968,8 @@ const styles = {
 
   heroDescription: {
     maxWidth: "570px",
-    color: "rgba(255,255,255,0.68)",
+    color:
+      "rgba(255,255,255,0.68)",
     fontSize: "17px",
     lineHeight: 1.7,
   },
@@ -611,15 +984,20 @@ const styles = {
     display: "flex",
     alignItems: "center",
     gap: "10px",
-    color: "rgba(255,255,255,0.82)",
+    color:
+      "rgba(255,255,255,0.82)",
   },
 
   formCard: {
     width: "100%",
-    border: "1px solid rgba(255,255,255,0.1)",
+    boxSizing: "border-box",
+    border:
+      "1px solid rgba(255,255,255,0.1)",
     borderRadius: "30px",
-    background: "rgba(15,15,18,0.88)",
-    boxShadow: "0 30px 100px rgba(0,0,0,0.46)",
+    background:
+      "rgba(15,15,18,0.88)",
+    boxShadow:
+      "0 30px 100px rgba(0,0,0,0.46)",
     backdropFilter: "blur(20px)",
     padding: "30px",
   },
@@ -637,9 +1015,11 @@ const styles = {
     borderRadius: "17px",
     display: "grid",
     placeItems: "center",
-    background: "rgba(229,9,20,0.15)",
+    background:
+      "rgba(229,9,20,0.15)",
     color: "#ff434d",
-    border: "1px solid rgba(229,9,20,0.3)",
+    border:
+      "1px solid rgba(229,9,20,0.3)",
   },
 
   formTitle: {
@@ -649,7 +1029,8 @@ const styles = {
 
   formSubtitle: {
     margin: "5px 0 0",
-    color: "rgba(255,255,255,0.56)",
+    color:
+      "rgba(255,255,255,0.56)",
   },
 
   successBox: {
@@ -658,17 +1039,21 @@ const styles = {
     gap: "12px",
     marginBottom: "18px",
     borderRadius: "17px",
-    border: "1px solid rgba(38,166,91,0.32)",
-    background: "rgba(38,166,91,0.1)",
+    border:
+      "1px solid rgba(38,166,91,0.32)",
+    background:
+      "rgba(38,166,91,0.1)",
     color: "#d7ffe4",
     padding: "14px",
   },
 
   loginAfterSignupButton: {
     marginTop: "10px",
-    border: "1px solid rgba(255,255,255,0.15)",
+    border:
+      "1px solid rgba(255,255,255,0.15)",
     borderRadius: "999px",
-    background: "rgba(255,255,255,0.08)",
+    background:
+      "rgba(255,255,255,0.08)",
     color: "#ffffff",
     padding: "8px 13px",
     cursor: "pointer",
@@ -677,8 +1062,10 @@ const styles = {
   errorBox: {
     marginBottom: "18px",
     borderRadius: "15px",
-    border: "1px solid rgba(229,9,20,0.35)",
-    background: "rgba(229,9,20,0.11)",
+    border:
+      "1px solid rgba(229,9,20,0.35)",
+    background:
+      "rgba(229,9,20,0.11)",
     color: "#ffc5c8",
     padding: "13px 14px",
   },
@@ -694,8 +1081,10 @@ const styles = {
     gap: "9px",
     padding: "5px",
     borderRadius: "17px",
-    background: "rgba(255,255,255,0.05)",
-    border: "1px solid rgba(255,255,255,0.08)",
+    background:
+      "rgba(255,255,255,0.05)",
+    border:
+      "1px solid rgba(255,255,255,0.08)",
   },
 
   accountButton: {
@@ -703,21 +1092,25 @@ const styles = {
     border: "none",
     borderRadius: "13px",
     background: "transparent",
-    color: "rgba(255,255,255,0.62)",
+    color:
+      "rgba(255,255,255,0.62)",
     fontWeight: 700,
     cursor: "pointer",
   },
 
   activeAccountButton: {
-    background: "linear-gradient(135deg, #e50914, #930009)",
+    background:
+      "linear-gradient(135deg, #e50914, #930009)",
     color: "#ffffff",
-    boxShadow: "0 10px 30px rgba(229,9,20,0.2)",
+    boxShadow:
+      "0 10px 30px rgba(229,9,20,0.2)",
   },
 
   label: {
     display: "grid",
     gap: "8px",
-    color: "rgba(255,255,255,0.78)",
+    color:
+      "rgba(255,255,255,0.78)",
     fontSize: "14px",
     fontWeight: 600,
   },
@@ -731,7 +1124,8 @@ const styles = {
   inputIcon: {
     position: "absolute",
     left: "14px",
-    color: "rgba(255,255,255,0.42)",
+    color:
+      "rgba(255,255,255,0.42)",
     pointerEvents: "none",
   },
 
@@ -739,10 +1133,12 @@ const styles = {
     width: "100%",
     minHeight: "49px",
     boxSizing: "border-box",
-    border: "1px solid rgba(255,255,255,0.1)",
+    border:
+      "1px solid rgba(255,255,255,0.1)",
     borderRadius: "15px",
     outline: "none",
-    background: "rgba(255,255,255,0.055)",
+    background:
+      "rgba(255,255,255,0.055)",
     color: "#ffffff",
     padding: "0 14px 0 44px",
   },
@@ -751,10 +1147,12 @@ const styles = {
     width: "100%",
     minHeight: "49px",
     boxSizing: "border-box",
-    border: "1px solid rgba(255,255,255,0.1)",
+    border:
+      "1px solid rgba(255,255,255,0.1)",
     borderRadius: "15px",
     outline: "none",
-    background: "rgba(255,255,255,0.055)",
+    background:
+      "rgba(255,255,255,0.055)",
     color: "#ffffff",
     padding: "0 48px 0 44px",
   },
@@ -763,7 +1161,8 @@ const styles = {
     width: "100%",
     minHeight: "49px",
     boxSizing: "border-box",
-    border: "1px solid rgba(255,255,255,0.1)",
+    border:
+      "1px solid rgba(255,255,255,0.1)",
     borderRadius: "15px",
     outline: "none",
     background: "#17171b",
@@ -779,7 +1178,8 @@ const styles = {
     border: "none",
     borderRadius: "10px",
     background: "transparent",
-    color: "rgba(255,255,255,0.55)",
+    color:
+      "rgba(255,255,255,0.55)",
     display: "grid",
     placeItems: "center",
     cursor: "pointer",
@@ -795,7 +1195,8 @@ const styles = {
     display: "flex",
     alignItems: "flex-start",
     gap: "10px",
-    color: "rgba(255,255,255,0.62)",
+    color:
+      "rgba(255,255,255,0.62)",
     fontSize: "13px",
     lineHeight: 1.5,
   },
@@ -804,7 +1205,8 @@ const styles = {
     minHeight: "51px",
     border: "none",
     borderRadius: "16px",
-    background: "linear-gradient(135deg, #e50914, #a30009)",
+    background:
+      "linear-gradient(135deg, #e50914, #a30009)",
     color: "#ffffff",
     fontSize: "15px",
     fontWeight: 800,
@@ -813,7 +1215,8 @@ const styles = {
     justifyContent: "center",
     gap: "9px",
     cursor: "pointer",
-    boxShadow: "0 16px 36px rgba(229,9,20,0.24)",
+    boxShadow:
+      "0 16px 36px rgba(229,9,20,0.24)",
   },
 
   disabledButton: {
@@ -822,13 +1225,15 @@ const styles = {
   },
 
   loaderIcon: {
-    animation: "spin 1s linear infinite",
+    animation:
+      "spin 1s linear infinite",
   },
 
   loginText: {
     margin: "2px 0 0",
     textAlign: "center",
-    color: "rgba(255,255,255,0.58)",
+    color:
+      "rgba(255,255,255,0.58)",
     fontSize: "14px",
   },
 
